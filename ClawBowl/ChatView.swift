@@ -2,12 +2,14 @@ import SwiftUI
 
 /// 聊天主视图
 struct ChatView: View {
+    @Environment(\.authService) private var authService
     @State private var messages: [Message] = [
         Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")
     ]
     @State private var inputText = ""
     @State private var isLoading = false
     @State private var showClearAlert = false
+    @State private var showLogoutAlert = false
 
     var body: some View {
         NavigationStack {
@@ -53,6 +55,13 @@ struct ChatView: View {
             .navigationTitle("ClawBowl")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: { showLogoutAlert = true }) {
+                        Image(systemName: "rectangle.portrait.and.arrow.right")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("清空") {
                         showClearAlert = true
@@ -68,6 +77,14 @@ struct ChatView: View {
                 }
             } message: {
                 Text("确定要清空所有聊天记录吗？")
+            }
+            .alert("退出登录", isPresented: $showLogoutAlert) {
+                Button("取消", role: .cancel) {}
+                Button("退出", role: .destructive) {
+                    authService.logout()
+                }
+            } message: {
+                Text("确定要退出登录吗？")
             }
         }
     }

@@ -44,11 +44,10 @@ struct ChatCompletionResponse: Decodable {
     }
 }
 
-/// API 请求体
+/// API 请求消息体（用于构建 chat completion 请求）
 struct ChatCompletionRequest: Encodable {
-    let model: String
+    let model: String?
     let messages: [RequestMessage]
-    let user: String?
     let stream: Bool
 
     struct RequestMessage: Encodable {

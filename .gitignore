@@ -26,6 +26,16 @@ Pods/
 *.swp
 *~.nib
 
+# Backend
+backend/venv/
+backend/.env
+backend/*.db
+backend/__pycache__/
+backend/app/__pycache__/
+backend/app/**/__pycache__/
+**/__pycache__/
+*.pyc
+
 # Misc
 *.pbxuser
 !default.pbxuser

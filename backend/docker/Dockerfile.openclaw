@@ -1,0 +1,29 @@
+FROM node:22-slim
+
+# Install curl for healthcheck
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create data directory for persistent state
+RUN mkdir -p /data/workspace /data/config
+
+# Create the symlink that mirrors host's openclaw installation.
+# At runtime, /usr/lib/node_modules/openclaw will be bind-mounted from the host.
+RUN mkdir -p /usr/lib/node_modules && \
+    ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/bin/openclaw
+
+# OpenClaw gateway listens on 18789 inside the container
+EXPOSE 18789
+
+# Health check
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -sf http://127.0.0.1:18789/v1/chat/completions -X POST \
+        -H "Content-Type: application/json" \
+        -d '{"model":"test","messages":[]}' 2>&1 | grep -q '"error"' && exit 0 || exit 1
+
+# Use /data/config as the openclaw state directory
+ENV OPENCLAW_STATE_DIR=/data/config
+ENV NODE_PATH=/usr/lib/node_modules
+
+ENTRYPOINT ["openclaw", "gateway", "--bind", "lan", "--port", "18789"]

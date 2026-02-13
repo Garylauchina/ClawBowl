@@ -1,0 +1,62 @@
+{
+  "models": {
+    "providers": {
+      "zenmux": {
+        "baseUrl": "https://zenmux.ai/api/v1",
+        "apiKey": "{{ ZENMUX_API_KEY }}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "openai/gpt-4.1-mini",
+            "name": "GPT-4.1 mini via ZenMux",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 200000,
+            "maxTokens": {{ MAX_TOKENS }}
+          },
+          {
+            "id": "anthropic/claude-sonnet-4.5",
+            "name": "Claude Sonnet 4.5 via ZenMux",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 200000,
+            "maxTokens": {{ MAX_TOKENS_PREMIUM }}
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "{{ PRIMARY_MODEL }}" },
+      "workspace": "/data/workspace",
+      "maxConcurrent": 1,
+      "subagents": { "maxConcurrent": 2 }
+    }
+  },
+  "channels": {},
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "lan",
+    "controlUi": { "enabled": false },
+    "auth": {
+      "mode": "token",
+      "token": "{{ GATEWAY_TOKEN }}"
+    },
+    "tailscale": { "mode": "off" },
+    "http": {
+      "endpoints": {
+        "chatCompletions": { "enabled": true },
+        "responses": { "enabled": false }
+      }
+    },
+    "nodes": { "denyCommands": ["*"] }
+  },
+  "tools": {},
+  "commands": { "native": "auto", "nativeSkills": "auto" },
+  "plugins": {},
+  "skills": { "install": { "nodeManager": "npm" } }
+}
