@@ -37,10 +37,10 @@ struct ChatView: View {
                         .padding(.vertical, 8)
                     }
                     .scrollDismissesKeyboard(.interactively)
-                    .onChange(of: messages.count) {
+                    .onChange(of: messages.count) { _ in
                         scrollToBottom(proxy: proxy)
                     }
-                    .onChange(of: isLoading) {
+                    .onChange(of: isLoading) { _ in
                         scrollToBottom(proxy: proxy)
                     }
                 }
