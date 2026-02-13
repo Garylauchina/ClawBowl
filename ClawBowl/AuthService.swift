@@ -1,4 +1,59 @@
 import Foundation
+import Security
+
+// MARK: - Keychain Helper
+
+/// 轻量 Keychain 封装，用于安全存储 JWT token
+private enum KeychainHelper {
+    static let service = "com.gangliu.ClawBowl"
+
+    static func save(_ value: String, forKey key: String) {
+        guard let data = value.data(using: .utf8) else { return }
+
+        // 先删除旧值
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        // 写入新值
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+        ]
+        SecItemAdd(addQuery as CFDictionary, nil)
+    }
+
+    static func load(forKey key: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func delete(forKey key: String) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+}
+
+// MARK: - AuthService
 
 /// 用户认证服务 – 处理注册、登录、JWT token 管理
 @MainActor
@@ -13,23 +68,28 @@ class AuthService: ObservableObject {
     private let userIdKey = "auth_user_id"
 
     private init() {
-        // 从 Keychain / UserDefaults 恢复 token
-        if let token = UserDefaults.standard.string(forKey: tokenKey),
-           !token.isEmpty {
+        // 从旧 UserDefaults 迁移到 Keychain（一次性）
+        migrateFromUserDefaultsIfNeeded()
+
+        // 从 Keychain 恢复 token
+        if let token = KeychainHelper.load(forKey: tokenKey), !token.isEmpty {
             self.isAuthenticated = true
-            self.currentUserId = UserDefaults.standard.string(forKey: userIdKey)
+            self.currentUserId = KeychainHelper.load(forKey: userIdKey)
         }
     }
 
     /// 当前存储的 JWT token
     var accessToken: String? {
-        UserDefaults.standard.string(forKey: tokenKey)
+        KeychainHelper.load(forKey: tokenKey)
     }
 
     // MARK: - Register
 
     func register(username: String, password: String) async throws {
-        let url = URL(string: "\(baseURL)/register")!
+        guard let url = URL(string: "\(baseURL)/register") else {
+            throw AuthError.invalidURL
+        }
+
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -59,7 +119,10 @@ class AuthService: ObservableObject {
     // MARK: - Login
 
     func login(username: String, password: String) async throws {
-        let url = URL(string: "\(baseURL)/login")!
+        guard let url = URL(string: "\(baseURL)/login") else {
+            throw AuthError.invalidURL
+        }
+
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -93,7 +156,10 @@ class AuthService: ObservableObject {
             throw AuthError.notAuthenticated
         }
 
-        let url = URL(string: "\(baseURL)/refresh")!
+        guard let url = URL(string: "\(baseURL)/refresh") else {
+            throw AuthError.invalidURL
+        }
+
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -117,8 +183,8 @@ class AuthService: ObservableObject {
     // MARK: - Logout
 
     func logout() {
-        UserDefaults.standard.removeObject(forKey: tokenKey)
-        UserDefaults.standard.removeObject(forKey: userIdKey)
+        KeychainHelper.delete(forKey: tokenKey)
+        KeychainHelper.delete(forKey: userIdKey)
         isAuthenticated = false
         currentUserId = nil
     }
@@ -126,8 +192,8 @@ class AuthService: ObservableObject {
     // MARK: - Private
 
     private func saveToken(_ response: TokenResponse) {
-        UserDefaults.standard.set(response.accessToken, forKey: tokenKey)
-        UserDefaults.standard.set(response.userId, forKey: userIdKey)
+        KeychainHelper.save(response.accessToken, forKey: tokenKey)
+        KeychainHelper.save(response.userId, forKey: userIdKey)
         isAuthenticated = true
         currentUserId = response.userId
     }
@@ -137,6 +203,20 @@ class AuthService: ObservableObject {
             return json["detail"]
         }
         return nil
+    }
+
+    /// 一次性迁移：将旧 UserDefaults 存储的 token 迁移到 Keychain
+    private func migrateFromUserDefaultsIfNeeded() {
+        let defaults = UserDefaults.standard
+        if let oldToken = defaults.string(forKey: tokenKey), !oldToken.isEmpty {
+            KeychainHelper.save(oldToken, forKey: tokenKey)
+            if let oldUserId = defaults.string(forKey: userIdKey) {
+                KeychainHelper.save(oldUserId, forKey: userIdKey)
+            }
+            // 清除旧存储
+            defaults.removeObject(forKey: tokenKey)
+            defaults.removeObject(forKey: userIdKey)
+        }
     }
 }
 
@@ -157,6 +237,7 @@ struct TokenResponse: Decodable {
 // MARK: - Errors
 
 enum AuthError: LocalizedError {
+    case invalidURL
     case invalidResponse
     case invalidCredentials
     case usernameTaken
@@ -166,6 +247,8 @@ enum AuthError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .invalidURL:
+            return "无效的请求地址"
         case .invalidResponse:
             return "服务器响应异常"
         case .invalidCredentials:
