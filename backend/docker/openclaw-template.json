@@ -55,7 +55,17 @@
     },
     "nodes": { "denyCommands": ["*"] }
   },
-  "tools": {},
+  "tools": {
+    "web": {
+      "search": {
+        "enabled": true,
+        "apiKey": "BSAHUPck1u-lRrQYy7wQxcOqJsqd5LK"
+      },
+      "fetch": {
+        "enabled": true
+      }
+    }
+  },
   "commands": { "native": "auto", "nativeSkills": "auto" },
   "plugins": {},
   "skills": { "install": { "nodeManager": "npm" } }
