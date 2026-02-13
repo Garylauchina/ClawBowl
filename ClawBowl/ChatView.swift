@@ -1,0 +1,187 @@
+import SwiftUI
+
+/// 聊天主视图
+struct ChatView: View {
+    @State private var messages: [Message] = [
+        Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")
+    ]
+    @State private var inputText = ""
+    @State private var isLoading = false
+    @State private var showClearAlert = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                // 消息列表
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(messages) { message in
+                                MessageBubble(message: message)
+                                    .id(message.id)
+                                    .transition(.asymmetric(
+                                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                                        removal: .opacity
+                                    ))
+                            }
+
+                            // 思考中动画
+                            if isLoading {
+                                ThinkingIndicator()
+                                    .id("thinking")
+                                    .transition(.opacity)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .onChange(of: messages.count) {
+                        scrollToBottom(proxy: proxy)
+                    }
+                    .onChange(of: isLoading) {
+                        scrollToBottom(proxy: proxy)
+                    }
+                }
+
+                Divider()
+
+                // 输入栏
+                ChatInputBar(text: $inputText, isLoading: isLoading) {
+                    sendMessage()
+                }
+            }
+            .navigationTitle("ClawBowl")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("清空") {
+                        showClearAlert = true
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                }
+            }
+            .alert("清空聊天", isPresented: $showClearAlert) {
+                Button("取消", role: .cancel) {}
+                Button("清空", role: .destructive) {
+                    clearChat()
+                }
+            } message: {
+                Text("确定要清空所有聊天记录吗？")
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private func sendMessage() {
+        let content = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty, !isLoading else { return }
+
+        // 添加用户消息
+        let userMessage = Message(role: .user, content: content)
+        withAnimation(.easeInOut(duration: 0.2)) {
+            messages.append(userMessage)
+        }
+        inputText = ""
+        isLoading = true
+
+        // 调用 API
+        Task {
+            do {
+                let reply = try await ChatService.shared.sendMessage(content, history: messages)
+                let assistantMessage = Message(role: .assistant, content: reply)
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        messages.append(assistantMessage)
+                        isLoading = false
+                    }
+                }
+            } catch {
+                let errorMessage = Message(
+                    role: .assistant,
+                    content: "抱歉，出了点问题：\(error.localizedDescription)。请稍后重试。",
+                    status: .error
+                )
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        messages.append(errorMessage)
+                        isLoading = false
+                    }
+                }
+            }
+        }
+    }
+
+    private func clearChat() {
+        withAnimation {
+            messages = [
+                Message(role: .assistant, content: "聊天记录已清空。有什么可以帮你的吗？")
+            ]
+        }
+        Task {
+            await ChatService.shared.resetSession()
+        }
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            withAnimation(.easeOut(duration: 0.2)) {
+                if isLoading {
+                    proxy.scrollTo("thinking", anchor: .bottom)
+                } else if let lastId = messages.last?.id {
+                    proxy.scrollTo(lastId, anchor: .bottom)
+                }
+            }
+        }
+    }
+}
+
+/// "正在思考" 动画指示器
+struct ThinkingIndicator: View {
+    @State private var animating = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            // AI 头像
+            Text("AI")
+                .font(.caption.bold())
+                .foregroundColor(.white)
+                .frame(width: 36, height: 36)
+                .background(
+                    LinearGradient(colors: [.purple, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing)
+                )
+                .clipShape(Circle())
+
+            // 思考气泡
+            HStack(spacing: 6) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(Color.secondary.opacity(0.5))
+                        .frame(width: 8, height: 8)
+                        .scaleEffect(animating ? 1.2 : 0.7)
+                        .opacity(animating ? 1 : 0.4)
+                        .animation(
+                            .easeInOut(duration: 0.6)
+                                .repeatForever()
+                                .delay(Double(index) * 0.2),
+                            value: animating
+                        )
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .background(Color(.systemGray6))
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 3)
+        .onAppear { animating = true }
+    }
+}
+
+#Preview {
+    ChatView()
+}
