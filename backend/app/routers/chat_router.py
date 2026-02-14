@@ -19,15 +19,9 @@ async def chat(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Send a chat message through the user's dedicated OpenClaw instance.
-
-    The orchestrator ensures the user's container is running, then proxies
-    the request.
-    """
-    # Ensure the user's OpenClaw instance is up
+    """Send a chat message through the user's dedicated OpenClaw instance."""
     instance = await instance_manager.ensure_running(user, db)
 
-    # Proxy to the user's container
     messages = [{"role": m.role, "content": m.content} for m in body.messages]
     try:
         result = await proxy_chat_request(

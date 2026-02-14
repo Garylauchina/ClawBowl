@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import Base, engine
-from app.routers import admin_router, auth_router, chat_router, instance_router
+from app.routers import admin_router, auth_router, chat_router, instance_router, llm_proxy_router
 from app.services.instance_manager import instance_manager
 
 logging.basicConfig(
@@ -90,6 +90,7 @@ app.include_router(auth_router.router)
 app.include_router(chat_router.router)
 app.include_router(instance_router.router)
 app.include_router(admin_router.router)
+app.include_router(llm_proxy_router.router)  # OpenClaw → LLM proxy → ZenMux
 
 
 @app.get("/healthz")
