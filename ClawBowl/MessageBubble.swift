@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 单条消息气泡视图
+/// 单条消息气泡视图（支持文本和图片）
 struct MessageBubble: View {
     let message: Message
 
@@ -11,21 +11,46 @@ struct MessageBubble: View {
             }
 
             VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 4) {
-                // 气泡
-                Text(message.content)
-                    .font(.body)
-                    .foregroundColor(message.role == .user ? .white : .primary)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(bubbleBackground)
-                    .clipShape(BubbleShape(isUser: message.role == .user))
-                    .contextMenu {
+                // 气泡内容
+                VStack(alignment: .leading, spacing: 6) {
+                    // 图片（如果有）
+                    if let imageData = message.imageData,
+                       let uiImage = UIImage(data: imageData) {
+                        Image(uiImage: uiImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 240, maxHeight: 240)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+
+                    // 文本（如果有）
+                    if !message.content.isEmpty {
+                        Text(message.content)
+                            .font(.body)
+                            .foregroundColor(message.role == .user ? .white : .primary)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(bubbleBackground)
+                .clipShape(BubbleShape(isUser: message.role == .user))
+                .contextMenu {
+                    Button {
+                        UIPasteboard.general.string = message.content
+                    } label: {
+                        Label("复制文字", systemImage: "doc.on.doc")
+                    }
+                    if message.imageData != nil {
                         Button {
-                            UIPasteboard.general.string = message.content
+                            if let imgData = message.imageData,
+                               let img = UIImage(data: imgData) {
+                                UIPasteboard.general.image = img
+                            }
                         } label: {
-                            Label("复制", systemImage: "doc.on.doc")
+                            Label("复制图片", systemImage: "photo.on.rectangle")
                         }
                     }
+                }
 
                 // 时间和状态
                 HStack(spacing: 4) {
@@ -96,7 +121,6 @@ struct BubbleShape: Shape {
                 in: CGRect(x: rect.minX, y: rect.minY, width: rect.width - tailSize, height: rect.height),
                 cornerSize: CGSize(width: radius, height: radius)
             )
-            // 右下角小尾巴
             path.move(to: CGPoint(x: rect.maxX - tailSize, y: rect.maxY - radius))
             path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
             path.addLine(to: CGPoint(x: rect.maxX - tailSize - 8, y: rect.maxY))
@@ -106,7 +130,6 @@ struct BubbleShape: Shape {
                 in: CGRect(x: rect.minX + tailSize, y: rect.minY, width: rect.width - tailSize, height: rect.height),
                 cornerSize: CGSize(width: radius, height: radius)
             )
-            // 左下角小尾巴
             path.move(to: CGPoint(x: rect.minX + tailSize, y: rect.maxY - radius))
             path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
             path.addLine(to: CGPoint(x: rect.minX + tailSize + 8, y: rect.maxY))
@@ -120,7 +143,7 @@ struct BubbleShape: Shape {
     VStack {
         MessageBubble(message: Message(role: .user, content: "你好！"))
         MessageBubble(message: Message(role: .assistant, content: "你好！有什么可以帮你的吗？"))
-        MessageBubble(message: Message(role: .user, content: "这是一条比较长的消息，用来测试气泡的换行效果和最大宽度限制。"))
+        MessageBubble(message: Message(role: .user, content: "这是一条带图片的消息"))
     }
     .padding()
 }

@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -27,7 +29,7 @@ class TokenResponse(BaseModel):
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: str | list[Any]  # str for text-only, list for multimodal (OpenAI vision format)
 
 
 class ChatRequest(BaseModel):

@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// AI 聊天 API 通信服务 – 通过 Orchestrator 代理到用户专属的 OpenClaw 实例
 actor ChatService {
@@ -6,15 +7,20 @@ actor ChatService {
 
     private let baseURL = "https://prometheusclothing.net/api/v2/chat"
 
+    /// 图片压缩：长边最大像素
+    private let maxImageDimension: CGFloat = 1024
+    /// 图片压缩：JPEG 质量
+    private let jpegQuality: CGFloat = 0.6
+
     private init() {}
 
-    /// 发送消息并获取 AI 回复
+    /// 发送消息并获取 AI 回复（支持多模态）
     /// - Parameters:
-    ///   - content: 用户消息内容
+    ///   - content: 用户消息文本
+    ///   - imageData: 可选的图片数据（已压缩的 JPEG）
     ///   - history: 历史消息（用于上下文）
     /// - Returns: AI 回复文本
-    func sendMessage(_ content: String, history: [Message]) async throws -> String {
-        // 获取 JWT token
+    func sendMessage(_ content: String, imageData: Data? = nil, history: [Message]) async throws -> String {
         guard let token = await AuthService.shared.accessToken else {
             throw ChatError.notAuthenticated
         }
@@ -28,9 +34,32 @@ actor ChatService {
 
         let recentHistory = history.suffix(20)
         for msg in recentHistory {
-            requestMessages.append(.init(role: msg.role.rawValue, content: msg.content))
+            if let imgData = msg.imageData {
+                // 历史消息中的图片也用多模态格式
+                let base64 = imgData.base64EncodedString()
+                var parts: [ContentPart] = []
+                if !msg.content.isEmpty {
+                    parts.append(.textPart(msg.content))
+                }
+                parts.append(.imagePart(base64: base64))
+                requestMessages.append(.init(role: msg.role.rawValue, content: .multimodal(parts)))
+            } else {
+                requestMessages.append(.init(role: msg.role.rawValue, content: .text(msg.content)))
+            }
         }
-        requestMessages.append(.init(role: "user", content: content))
+
+        // 当前消息
+        if let imgData = imageData {
+            let base64 = imgData.base64EncodedString()
+            var parts: [ContentPart] = []
+            if !content.isEmpty {
+                parts.append(.textPart(content))
+            }
+            parts.append(.imagePart(base64: base64))
+            requestMessages.append(.init(role: "user", content: .multimodal(parts)))
+        } else {
+            requestMessages.append(.init(role: "user", content: .text(content)))
+        }
 
         let requestBody = ChatRequest(
             messages: requestMessages,
@@ -41,7 +70,7 @@ actor ChatService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 120  // AI 回复 + 可能的容器启动时间
+        request.timeoutInterval = 120
 
         let encoder = JSONEncoder()
         request.httpBody = try encoder.encode(requestBody)
@@ -55,7 +84,6 @@ actor ChatService {
         guard httpResponse.statusCode == 200 else {
             switch httpResponse.statusCode {
             case 401:
-                // Token 过期，尝试刷新
                 try? await AuthService.shared.refreshToken()
                 throw ChatError.notAuthenticated
             case 429:
@@ -74,11 +102,29 @@ actor ChatService {
         let decoder = JSONDecoder()
         let completionResponse = try decoder.decode(ChatCompletionResponse.self, from: data)
 
-        guard let content = completionResponse.choices?.first?.message?.content else {
+        guard let replyContent = completionResponse.choices?.first?.message?.content else {
             throw ChatError.emptyResponse
         }
 
-        return content
+        return replyContent
+    }
+
+    /// 压缩图片：缩放到最大尺寸并转为 JPEG
+    func compressImage(_ image: UIImage) -> Data? {
+        let maxDim = maxImageDimension
+        var targetSize = image.size
+
+        // 等比缩放
+        if max(targetSize.width, targetSize.height) > maxDim {
+            let scale = maxDim / max(targetSize.width, targetSize.height)
+            targetSize = CGSize(width: targetSize.width * scale, height: targetSize.height * scale)
+        }
+
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        let resized = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return resized.jpegData(compressionQuality: jpegQuality)
     }
 
     /// 重置会话（请求后端销毁并重建 OpenClaw 实例）

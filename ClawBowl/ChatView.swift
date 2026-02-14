@@ -7,6 +7,7 @@ struct ChatView: View {
         Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")
     ]
     @State private var inputText = ""
+    @State private var selectedImage: UIImage?
     @State private var isLoading = false
     @State private var showClearAlert = false
     @State private var showLogoutAlert = false
@@ -48,7 +49,11 @@ struct ChatView: View {
                 Divider()
 
                 // 输入栏
-                ChatInputBar(text: $inputText, isLoading: isLoading) {
+                ChatInputBar(
+                    text: $inputText,
+                    selectedImage: $selectedImage,
+                    isLoading: isLoading
+                ) {
                     sendMessage()
                 }
             }
@@ -93,20 +98,41 @@ struct ChatView: View {
 
     private func sendMessage() {
         let content = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty, !isLoading else { return }
+        let image = selectedImage
+        guard !content.isEmpty || image != nil else { return }
+        guard !isLoading else { return }
 
-        // 添加用户消息
-        let userMessage = Message(role: .user, content: content)
+        // 生成缩略图用于消息气泡显示（同步，快速）
+        let thumbnailData = image?.jpegData(compressionQuality: 0.5)
+
+        // 添加用户消息（立即显示）
+        let displayText = content.isEmpty && image != nil ? "[图片]" : content
+        let userMessage = Message(
+            role: .user,
+            content: displayText,
+            imageData: thumbnailData
+        )
         withAnimation(.easeInOut(duration: 0.2)) {
             messages.append(userMessage)
         }
         inputText = ""
+        selectedImage = nil
         isLoading = true
 
-        // 调用 API
+        // 异步：压缩图片 + 调用 API
         Task {
             do {
-                let reply = try await ChatService.shared.sendMessage(content, history: messages)
+                var apiImageData: Data?
+                if let img = image {
+                    apiImageData = await ChatService.shared.compressImage(img)
+                }
+
+                let historyMessages = Array(messages.dropLast())
+                let reply = try await ChatService.shared.sendMessage(
+                    content,
+                    imageData: apiImageData,
+                    history: historyMessages
+                )
                 let assistantMessage = Message(role: .assistant, content: reply)
                 await MainActor.run {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -135,6 +161,7 @@ struct ChatView: View {
             messages = [
                 Message(role: .assistant, content: "聊天记录已清空。有什么可以帮你的吗？")
             ]
+            selectedImage = nil
         }
         Task {
             await ChatService.shared.resetSession()

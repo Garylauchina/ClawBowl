@@ -5,6 +5,7 @@ struct Message: Identifiable, Equatable {
     let id: UUID
     let role: Role
     let content: String
+    let imageData: Data?  // 用户发送的图片（JPEG 压缩后）
     let timestamp: Date
     var status: Status
 
@@ -19,13 +20,17 @@ struct Message: Identifiable, Equatable {
         case error
     }
 
-    init(role: Role, content: String, status: Status = .sent) {
+    init(role: Role, content: String, imageData: Data? = nil, status: Status = .sent) {
         self.id = UUID()
         self.role = role
         self.content = content
+        self.imageData = imageData
         self.timestamp = Date()
         self.status = status
     }
+
+    /// 是否包含图片
+    var hasImage: Bool { imageData != nil }
 }
 
 /// OpenAI 兼容的 API 响应模型
@@ -52,6 +57,47 @@ struct ChatCompletionRequest: Encodable {
 
     struct RequestMessage: Encodable {
         let role: String
-        let content: String
+        let content: MessageContent
+    }
+}
+
+/// 消息内容：纯文本 或 多模态数组（OpenAI Vision 格式）
+enum MessageContent: Encodable {
+    case text(String)
+    case multimodal([ContentPart])
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .text(let string):
+            try container.encode(string)
+        case .multimodal(let parts):
+            try container.encode(parts)
+        }
+    }
+}
+
+/// 多模态内容块
+struct ContentPart: Encodable {
+    let type: String
+    let text: String?
+    let image_url: ImageURL?
+
+    struct ImageURL: Encodable {
+        let url: String
+    }
+
+    /// 创建文本内容块
+    static func textPart(_ text: String) -> ContentPart {
+        ContentPart(type: "text", text: text, image_url: nil)
+    }
+
+    /// 创建图片内容块（base64 data URL）
+    static func imagePart(base64: String) -> ContentPart {
+        ContentPart(
+            type: "image_url",
+            text: nil,
+            image_url: ImageURL(url: "data:image/jpeg;base64,\(base64)")
+        )
     }
 }
