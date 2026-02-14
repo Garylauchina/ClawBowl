@@ -30,19 +30,15 @@ actor ChatService {
         }
 
         // 构建消息列表（最近 10 轮对话 = 20 条消息）
+        // 历史消息中的图片不发送 base64（避免请求体过大），只用文本标记
         var requestMessages: [ChatCompletionRequest.RequestMessage] = []
 
         let recentHistory = history.suffix(20)
         for msg in recentHistory {
-            if let imgData = msg.imageData {
-                // 历史消息中的图片也用多模态格式
-                let base64 = imgData.base64EncodedString()
-                var parts: [ContentPart] = []
-                if !msg.content.isEmpty {
-                    parts.append(.textPart(msg.content))
-                }
-                parts.append(.imagePart(base64: base64))
-                requestMessages.append(.init(role: msg.role.rawValue, content: .multimodal(parts)))
+            if msg.imageData != nil {
+                // 历史消息中曾有图片，用文本标记代替 base64
+                let text = msg.content.isEmpty ? "[图片]" : "\(msg.content)\n[图片]"
+                requestMessages.append(.init(role: msg.role.rawValue, content: .text(text)))
             } else {
                 requestMessages.append(.init(role: msg.role.rawValue, content: .text(msg.content)))
             }

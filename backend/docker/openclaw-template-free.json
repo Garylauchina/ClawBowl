@@ -40,6 +40,9 @@
   "agents": {
     "defaults": {
       "model": { "primary": "{{ PRIMARY_MODEL }}" },
+      "imageModel": {
+        "primary": "zenmux/z-ai/glm-4.6v-flash-free"
+      },
       "models": {
         "zenmux/deepseek/deepseek-chat": {},
         "zenmux/xiaomi/mimo-v2-flash": {},
