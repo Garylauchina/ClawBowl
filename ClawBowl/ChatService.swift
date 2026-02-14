@@ -7,10 +7,10 @@ actor ChatService {
 
     private let baseURL = "https://prometheusclothing.net/api/v2/chat"
 
-    /// 图片压缩：长边最大像素
-    private let maxImageDimension: CGFloat = 1024
+    /// 图片压缩：长边最大像素（确保 base64 后 < 800KB）
+    private let maxImageDimension: CGFloat = 512
     /// 图片压缩：JPEG 质量
-    private let jpegQuality: CGFloat = 0.6
+    private let jpegQuality: CGFloat = 0.4
 
     private init() {}
 

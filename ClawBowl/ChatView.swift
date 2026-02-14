@@ -102,35 +102,37 @@ struct ChatView: View {
         guard !content.isEmpty || image != nil else { return }
         guard !isLoading else { return }
 
-        // 生成缩略图用于消息气泡显示（同步，快速）
-        let thumbnailData = image?.jpegData(compressionQuality: 0.5)
-
-        // 添加用户消息（立即显示）
-        let displayText = content.isEmpty && image != nil ? "[图片]" : content
-        let userMessage = Message(
-            role: .user,
-            content: displayText,
-            imageData: thumbnailData
-        )
-        withAnimation(.easeInOut(duration: 0.2)) {
-            messages.append(userMessage)
-        }
+        // 清空输入
         inputText = ""
         selectedImage = nil
         isLoading = true
 
-        // 异步：压缩图片 + 调用 API
+        // 异步：先压缩图片，再显示消息和调用 API
         Task {
             do {
-                var apiImageData: Data?
+                // 压缩图片（同一份数据用于显示和 API）
+                var compressedData: Data?
                 if let img = image {
-                    apiImageData = await ChatService.shared.compressImage(img)
+                    compressedData = await ChatService.shared.compressImage(img)
+                }
+
+                // 添加用户消息（用压缩后的图片）
+                let displayText = content.isEmpty && image != nil ? "[图片]" : content
+                let userMessage = Message(
+                    role: .user,
+                    content: displayText,
+                    imageData: compressedData
+                )
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        messages.append(userMessage)
+                    }
                 }
 
                 let historyMessages = Array(messages.dropLast())
                 let reply = try await ChatService.shared.sendMessage(
                     content,
-                    imageData: apiImageData,
+                    imageData: compressedData,
                     history: historyMessages
                 )
                 let assistantMessage = Message(role: .assistant, content: reply)
