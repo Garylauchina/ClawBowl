@@ -1,4 +1,4 @@
-"""Generate per-user openclaw.json from the template."""
+"""Generate per-user openclaw.json from tier-specific templates."""
 
 import json
 import secrets
@@ -9,11 +9,25 @@ from app.models import User
 from app.subscriptions.tier import get_tier
 from app.subscriptions.zenmux_strategy import get_zenmux_key_for_tier
 
-_TEMPLATE_PATH = Path(__file__).resolve().parent.parent.parent / "docker" / "openclaw-template.json"
+_TEMPLATE_DIR = Path(__file__).resolve().parent.parent.parent / "docker"
+
+# Template files keyed by tier.template value
+_TEMPLATES = {
+    "free": _TEMPLATE_DIR / "openclaw-template-free.json",
+    "premium": _TEMPLATE_DIR / "openclaw-template-premium.json",
+}
+
+# Fallback: legacy single template
+_LEGACY_TEMPLATE = _TEMPLATE_DIR / "openclaw-template.json"
 
 
-def _load_template() -> str:
-    return _TEMPLATE_PATH.read_text(encoding="utf-8")
+def _load_template(template_key: str) -> str:
+    """Load template content by key. Falls back to legacy template if needed."""
+    path = _TEMPLATES.get(template_key)
+    if path and path.exists():
+        return path.read_text(encoding="utf-8")
+    # Fallback to legacy template
+    return _LEGACY_TEMPLATE.read_text(encoding="utf-8")
 
 
 def generate_gateway_token() -> str:
@@ -26,12 +40,11 @@ def render_config(user: User, gateway_token: str) -> dict:
     tier = get_tier(user.subscription_tier)
     api_key = get_zenmux_key_for_tier(tier, settings.zenmux_api_key)
 
-    raw = _load_template()
+    raw = _load_template(tier.template)
 
     # Replace template placeholders
     raw = raw.replace("{{ ZENMUX_API_KEY }}", api_key)
     raw = raw.replace("{{ MAX_TOKENS }}", str(tier.max_tokens))
-    raw = raw.replace("{{ MAX_TOKENS_PREMIUM }}", str(tier.max_tokens_premium))
     raw = raw.replace("{{ PRIMARY_MODEL }}", tier.primary_model)
     raw = raw.replace("{{ GATEWAY_TOKEN }}", gateway_token)
 

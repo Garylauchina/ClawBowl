@@ -1,0 +1,108 @@
+{
+  "models": {
+    "providers": {
+      "zenmux": {
+        "baseUrl": "https://zenmux.ai/api/v1",
+        "apiKey": "{{ ZENMUX_API_KEY }}",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "zenmux/auto",
+            "name": "ZenMux 智能路由 (自动选择最优模型)",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 262144,
+            "maxTokens": {{ MAX_TOKENS }}
+          },
+          {
+            "id": "deepseek/deepseek-reasoner",
+            "name": "DeepSeek V3.2 深度思考",
+            "reasoning": true,
+            "input": ["text"],
+            "cost": { "input": 0.28, "output": 0.42, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": {{ MAX_TOKENS }}
+          },
+          {
+            "id": "z-ai/glm-4.7",
+            "name": "智谱 GLM 4.7 旗舰",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0.28, "output": 1.14, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 200000,
+            "maxTokens": {{ MAX_TOKENS }}
+          },
+          {
+            "id": "moonshotai/kimi-k2-thinking",
+            "name": "Kimi K2 深度推理",
+            "reasoning": true,
+            "input": ["text"],
+            "cost": { "input": 0.60, "output": 2.50, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 262144,
+            "maxTokens": {{ MAX_TOKENS }}
+          },
+          {
+            "id": "volcengine/doubao-seed-1.8",
+            "name": "字节豆包 Seed 1.8",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "cost": { "input": 0.11, "output": 0.28, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 256000,
+            "maxTokens": {{ MAX_TOKENS }}
+          },
+          {
+            "id": "baidu/ernie-5.0-thinking-preview",
+            "name": "百度文心 5.0",
+            "reasoning": true,
+            "input": ["text"],
+            "cost": { "input": 0.84, "output": 3.37, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": {{ MAX_TOKENS }}
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "{{ PRIMARY_MODEL }}" },
+      "workspace": "/data/workspace",
+      "maxConcurrent": 2,
+      "subagents": { "maxConcurrent": 3 }
+    }
+  },
+  "channels": {},
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "lan",
+    "controlUi": { "enabled": false },
+    "auth": {
+      "mode": "token",
+      "token": "{{ GATEWAY_TOKEN }}"
+    },
+    "tailscale": { "mode": "off" },
+    "http": {
+      "endpoints": {
+        "chatCompletions": { "enabled": true },
+        "responses": { "enabled": false }
+      }
+    },
+    "nodes": { "denyCommands": ["*"] }
+  },
+  "tools": {
+    "web": {
+      "search": {
+        "enabled": true,
+        "apiKey": "BSAHUPck1u-lRrQYy7wQxcOqJsqd5LK"
+      },
+      "fetch": {
+        "enabled": true
+      }
+    }
+  },
+  "commands": { "native": "auto", "nativeSkills": "auto" },
+  "plugins": {},
+  "skills": { "install": { "nodeManager": "npm" } }
+}
