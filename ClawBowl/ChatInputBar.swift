@@ -9,7 +9,7 @@ struct ChatInputBar: View {
     let onSend: () -> Void
 
     @FocusState private var isFocused: Bool
-    @State private var photosPickerItem: PhotosPickerItem?
+    @State private var showImagePicker = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,7 +36,6 @@ struct ChatInputBar: View {
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             selectedImage = nil
-                            photosPickerItem = nil
                         }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
@@ -52,16 +51,15 @@ struct ChatInputBar: View {
             // 输入行
             HStack(alignment: .bottom, spacing: 8) {
                 // 图片选择按钮
-                PhotosPicker(selection: $photosPickerItem, matching: .images) {
+                Button {
+                    showImagePicker = true
+                } label: {
                     Image(systemName: selectedImage != nil ? "photo.fill" : "photo")
                         .font(.system(size: 22))
                         .foregroundStyle(selectedImage != nil ? .blue : .secondary)
                         .frame(width: 36, height: 36)
                 }
                 .disabled(isLoading)
-                .onChange(of: photosPickerItem) { _ in
-                    loadImage()
-                }
 
                 // 输入框
                 TextField(isLoading ? "AI 正在思考..." : "输入消息...", text: $text, axis: .vertical)
@@ -90,6 +88,9 @@ struct ChatInputBar: View {
             .padding(.vertical, 8)
         }
         .background(.ultraThinMaterial)
+        .sheet(isPresented: $showImagePicker) {
+            ImagePicker(image: $selectedImage)
+        }
     }
 
     /// 有文字或有图片即可发送
@@ -98,16 +99,48 @@ struct ChatInputBar: View {
         let hasImage = selectedImage != nil
         return (hasText || hasImage) && !isLoading
     }
+}
 
-    /// 从 PhotosPicker 加载图片
-    private func loadImage() {
-        guard let item = photosPickerItem else { return }
-        Task {
-            if let data = try? await item.loadTransferable(type: Data.self),
-               let uiImage = UIImage(data: data) {
-                await MainActor.run {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        selectedImage = uiImage
+// MARK: - PHPicker 封装（带"添加"按钮的标准图片选择器）
+
+struct ImagePicker: UIViewControllerRepresentable {
+    @Binding var image: UIImage?
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration()
+        config.selectionLimit = 1
+        config.filter = .images
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let parent: ImagePicker
+
+        init(_ parent: ImagePicker) {
+            self.parent = parent
+        }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            parent.dismiss()
+
+            guard let provider = results.first?.itemProvider,
+                  provider.canLoadObject(ofClass: UIImage.self) else { return }
+
+            provider.loadObject(ofClass: UIImage.self) { object, _ in
+                if let uiImage = object as? UIImage {
+                    DispatchQueue.main.async {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            self.parent.image = uiImage
+                        }
                     }
                 }
             }
