@@ -2,17 +2,35 @@
   "models": {
     "providers": {
       "zenmux": {
-        "baseUrl": "http://172.17.0.1:8000/llm",
-        "apiKey": "{{ GATEWAY_TOKEN }}",
+        "baseUrl": "https://zenmux.ai/api/v1",
+        "apiKey": "{{ ZENMUX_API_KEY }}",
         "api": "openai-completions",
         "models": [
           {
-            "id": "zenmux/auto",
-            "name": "ZenMux AutoRouter",
+            "id": "deepseek/deepseek-chat",
+            "name": "DeepSeek V3.2",
             "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0.28, "output": 0.42, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": {{ MAX_TOKENS }}
+          },
+          {
+            "id": "xiaomi/mimo-v2-flash",
+            "name": "小米 MiMo V2 Flash",
+            "reasoning": true,
             "input": ["text"],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
             "contextWindow": 262144,
+            "maxTokens": {{ MAX_TOKENS }}
+          },
+          {
+            "id": "z-ai/glm-4.6v-flash-free",
+            "name": "智谱 GLM 4.6V Flash",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 200000,
             "maxTokens": {{ MAX_TOKENS }}
           }
         ]
@@ -22,6 +40,11 @@
   "agents": {
     "defaults": {
       "model": { "primary": "{{ PRIMARY_MODEL }}" },
+      "models": {
+        "zenmux/deepseek/deepseek-chat": {},
+        "zenmux/xiaomi/mimo-v2-flash": {},
+        "zenmux/z-ai/glm-4.6v-flash-free": {}
+      },
       "workspace": "/data/workspace",
       "maxConcurrent": 1,
       "subagents": { "maxConcurrent": 1 }
@@ -52,9 +75,7 @@
         "enabled": true,
         "apiKey": "BSAHUPck1u-lRrQYy7wQxcOqJsqd5LK"
       },
-      "fetch": {
-        "enabled": true
-      }
+      "fetch": { "enabled": true }
     }
   },
   "commands": { "native": "auto", "nativeSkills": "auto" },

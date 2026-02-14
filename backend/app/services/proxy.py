@@ -23,7 +23,7 @@ async def proxy_chat_request(
         "Authorization": f"Bearer {instance.gateway_token}",
     }
     body: dict = {
-        "model": model or "zenmux/auto",
+        "model": model or "zenmux/deepseek/deepseek-chat",
         "messages": messages,
         "stream": stream,
     }
