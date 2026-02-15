@@ -18,6 +18,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -279,6 +280,14 @@ def _make_content_chunk(text: str) -> str:
     return f"data: {payload}\n\n"
 
 
+_TURN_GAP_SECONDS = 3.0
+"""时间间隔阈值（秒）：content chunk 之间超过此间隔视为新的 agent 轮次。
+
+OpenClaw 网关在工具执行期间会暂停 SSE 流（几秒到几分钟），
+而 LLM 文本生成是毫秒级连续输出。利用这个时间差来检测轮次边界，
+从而将最后一个"快速连发"段识别为最终结果。"""
+
+
 async def proxy_chat_stream(
     instance: OpenClawInstance,
     messages: list[dict],
@@ -286,14 +295,12 @@ async def proxy_chat_stream(
 ) -> AsyncGenerator[str, None]:
     """Forward a chat completion request and yield SSE lines in real time.
 
-    所有 delta.content 先作为 delta.thinking 流式发送（客户端浅色字体实时显示），
-    同时缓冲内容。当检测到轮次结束时：
-    - finish_reason: "tool_calls" → 清空当前轮缓冲（推理轮结束，文本丢弃）
-    - finish_reason: "stop" → 将最后一轮缓冲作为 delta.content 发送（正式回答）
-    - [DONE] 不再兜底发送缓冲 — 避免整个推理过程作为正式内容
-
-    效果：推理过程实时以浅色字体显示 → 若有明确 stop 轮次，只保留最终结果。
-    若网关不发送轮次标记，推理文本仅以浅色 thinking 样式保留，不转为正式内容。
+    核心策略：
+    1. 所有 delta.content → 作为 thinking 实时发送（浅色字体）
+    2. 同时缓冲内容，用时间间隔检测轮次边界
+    3. content chunk 间隔 > 3 秒 → 视为新轮次，清空缓冲 + 在 thinking 中插入换行
+    4. [DONE] / finish_reason:"stop" → 将最后一轮缓冲作为 content 发送（正式回答）
+    5. 客户端收到 content → 清除 thinking，只保留最终结果
     """
     messages = _preprocess_attachments(instance, messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream=True)
@@ -301,8 +308,9 @@ async def proxy_chat_stream(
     seen_tools: set[str] = set()
     content_buf: list[str] = []   # buffer content for current turn
     thinking_emitted = False      # any thinking sent yet?
-    seen_stop = False             # received finish_reason: "stop"
-    chunk_count = 0               # total chunks received (for logging)
+    last_content_ts = 0.0         # monotonic time of last content chunk
+    turn_count = 1                # current turn number
+    chunk_count = 0               # total chunks (for logging)
 
     last_exc: Exception | None = None
     for attempt in range(2):
@@ -317,28 +325,21 @@ async def proxy_chat_stream(
 
                         # data: [DONE]
                         if line == "data: [DONE]":
-                            # Only emit buffer if we never got an explicit "stop"
-                            # (safety net for well-behaved gateways)
-                            if content_buf and not seen_stop:
-                                # No "stop" was received; gateway streams everything
-                                # as one blob. DON'T emit as content — let client
-                                # keep the thinking text as final display.
-                                logger.info(
-                                    "SSE [DONE] without stop: %d chunks buffered, "
-                                    "NOT emitting as content (thinking-only mode)",
-                                    len(content_buf),
-                                )
+                            # Emit last turn's buffer as real content
+                            if content_buf:
+                                final = "".join(content_buf).strip()
+                                if final:
+                                    yield _make_content_chunk(final)
                             yield "data: [DONE]\n\n"
                             logger.info(
-                                "SSE stream done: %d chunks, %d tools, stop=%s",
-                                chunk_count, len(seen_tools), seen_stop,
+                                "SSE done: %d chunks, %d turns, %d tools",
+                                chunk_count, turn_count, len(seen_tools),
                             )
                             return
 
                         if not line.startswith("data: "):
                             continue
 
-                        # Parse the JSON payload
                         try:
                             chunk = json.loads(line[6:])
                         except json.JSONDecodeError:
@@ -354,12 +355,14 @@ async def proxy_chat_stream(
                         finish_reason = choices[0].get("finish_reason")
                         chunk_count += 1
 
-                        # Log chunk info (sample: first 5 + every 50th + finish)
-                        if chunk_count <= 5 or chunk_count % 50 == 0 or finish_reason:
-                            delta_keys = [k for k in delta if delta[k]]
+                        # Sampled logging
+                        if chunk_count <= 3 or chunk_count % 100 == 0 or finish_reason:
                             logger.info(
-                                "SSE #%d: delta_keys=%s finish=%s",
-                                chunk_count, delta_keys, finish_reason,
+                                "SSE #%d: keys=%s finish=%s turn=%d",
+                                chunk_count,
+                                [k for k in delta if delta[k]],
+                                finish_reason,
+                                turn_count,
                             )
 
                         # ── Tool calls → emit thinking status ──
@@ -374,30 +377,50 @@ async def proxy_chat_stream(
                                         tool_name, f"正在执行 {tool_name}..."
                                     )
                                     prefix = "\n" if thinking_emitted else ""
-                                    yield _make_thinking_chunk(prefix + status)
+                                    yield _make_thinking_chunk(prefix + status + "\n")
                                     thinking_emitted = True
 
-                        # ── Content text → stream as thinking + buffer ──
+                        # ── Content text ──
                         content_text = delta.get("content")
                         if content_text:
+                            now = time.monotonic()
+
+                            # 检测轮次边界：时间间隔 > 阈值 → 新轮次
+                            if last_content_ts > 0:
+                                gap = now - last_content_ts
+                                if gap > _TURN_GAP_SECONDS:
+                                    # 新轮次：清空缓冲 + 在 thinking 中插入分隔
+                                    content_buf.clear()
+                                    turn_count += 1
+                                    if thinking_emitted:
+                                        yield _make_thinking_chunk("\n\n")
+                                    logger.info(
+                                        "Turn boundary: gap=%.1fs → turn %d",
+                                        gap, turn_count,
+                                    )
+
+                            last_content_ts = now
+
+                            # Stream as thinking + buffer
                             yield _make_thinking_chunk(content_text)
                             content_buf.append(content_text)
                             thinking_emitted = True
 
-                        # ── Finish reason ──
+                        # ── Finish reason (protocol-level markers) ──
                         if finish_reason == "tool_calls":
-                            # Agent turn ended → reasoning discarded, start fresh
                             content_buf.clear()
-                            logger.info("Turn ended (tool_calls), buffer cleared")
+                            turn_count += 1
+                            if thinking_emitted:
+                                yield _make_thinking_chunk("\n\n")
+                            logger.info("Turn ended (tool_calls) → turn %d", turn_count)
                         elif finish_reason == "stop":
-                            seen_stop = True
-                            # Final turn → emit buffered content as real content
                             if content_buf:
-                                yield _make_content_chunk("".join(content_buf))
+                                final = "".join(content_buf).strip()
+                                if final:
+                                    yield _make_content_chunk(final)
                                 content_buf.clear()
                                 logger.info("Final turn (stop), content emitted")
 
-            # Stream completed successfully
             return
 
         except (httpx.ConnectError, httpx.ReadError) as exc:
