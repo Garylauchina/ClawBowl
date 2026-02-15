@@ -1,11 +1,39 @@
 import Foundation
 
+// MARK: - Attachment (通用附件：图片或文件)
+
+/// 通用附件模型，可表示图片或任意文件
+struct Attachment: Equatable {
+    let filename: String     // "photo.jpg" 或 "report.pdf"
+    let data: Data
+    let mimeType: String     // "image/jpeg", "application/pdf", etc.
+
+    /// 便于 UI 判断是否显示缩略图
+    var isImage: Bool {
+        mimeType.hasPrefix("image/")
+    }
+
+    /// 人类可读的文件大小
+    var formattedSize: String {
+        let bytes = Double(data.count)
+        if bytes < 1024 {
+            return "\(Int(bytes)) B"
+        } else if bytes < 1024 * 1024 {
+            return String(format: "%.1f KB", bytes / 1024)
+        } else {
+            return String(format: "%.1f MB", bytes / (1024 * 1024))
+        }
+    }
+}
+
+// MARK: - Message
+
 /// 聊天消息模型
 struct Message: Identifiable, Equatable {
     let id: UUID
     let role: Role
     var content: String
-    let imageData: Data?  // 用户发送的图片（JPEG 压缩后）
+    let attachment: Attachment?  // 用户发送的附件（图片或文件）
     let timestamp: Date
     var status: Status
 
@@ -28,7 +56,7 @@ struct Message: Identifiable, Equatable {
     init(
         role: Role,
         content: String,
-        imageData: Data? = nil,
+        attachment: Attachment? = nil,
         status: Status = .sent,
         thinkingText: String = "",
         isStreaming: Bool = false
@@ -36,16 +64,20 @@ struct Message: Identifiable, Equatable {
         self.id = UUID()
         self.role = role
         self.content = content
-        self.imageData = imageData
+        self.attachment = attachment
         self.timestamp = Date()
         self.status = status
         self.thinkingText = thinkingText
         self.isStreaming = isStreaming
     }
 
-    /// 是否包含图片
-    var hasImage: Bool { imageData != nil }
+    /// 是否包含附件
+    var hasAttachment: Bool { attachment != nil }
+    /// 是否包含图片附件
+    var hasImage: Bool { attachment?.isImage ?? false }
 }
+
+// MARK: - API Response Models
 
 /// OpenAI 兼容的 API 响应模型
 struct ChatCompletionResponse: Decodable {
@@ -63,6 +95,8 @@ struct ChatCompletionResponse: Decodable {
     }
 }
 
+// MARK: - API Request Models
+
 /// API 请求消息体（用于构建 chat completion 请求）
 struct ChatCompletionRequest: Encodable {
     let model: String?
@@ -75,7 +109,7 @@ struct ChatCompletionRequest: Encodable {
     }
 }
 
-/// 消息内容：纯文本 或 多模态数组（OpenAI Vision 格式）
+/// 消息内容：纯文本 或 多模态数组（OpenAI Vision 格式 + 通用文件）
 enum MessageContent: Encodable {
     case text(String)
     case multimodal([ContentPart])
@@ -91,11 +125,15 @@ enum MessageContent: Encodable {
     }
 }
 
-/// 多模态内容块
+/// 多模态内容块（图片用 OpenAI image_url 格式，文件用自定义 file 格式）
 struct ContentPart: Encodable {
     let type: String
     let text: String?
     let image_url: ImageURL?
+    // 文件附件专用字段
+    let filename: String?
+    let mime_type: String?
+    let data: String?  // base64 编码的文件数据
 
     struct ImageURL: Encodable {
         let url: String
@@ -103,15 +141,30 @@ struct ContentPart: Encodable {
 
     /// 创建文本内容块
     static func textPart(_ text: String) -> ContentPart {
-        ContentPart(type: "text", text: text, image_url: nil)
+        ContentPart(type: "text", text: text, image_url: nil, filename: nil, mime_type: nil, data: nil)
     }
 
-    /// 创建图片内容块（base64 data URL）
-    static func imagePart(base64: String) -> ContentPart {
+    /// 创建图片内容块（base64 data URL，OpenAI Vision 格式）
+    static func imagePart(base64: String, mimeType: String = "image/jpeg") -> ContentPart {
         ContentPart(
             type: "image_url",
             text: nil,
-            image_url: ImageURL(url: "data:image/jpeg;base64,\(base64)")
+            image_url: ImageURL(url: "data:\(mimeType);base64,\(base64)"),
+            filename: nil,
+            mime_type: nil,
+            data: nil
+        )
+    }
+
+    /// 创建文件内容块（通用文件）
+    static func filePart(base64: String, filename: String, mimeType: String) -> ContentPart {
+        ContentPart(
+            type: "file",
+            text: nil,
+            image_url: nil,
+            filename: filename,
+            mime_type: mimeType,
+            data: base64
         )
     }
 }

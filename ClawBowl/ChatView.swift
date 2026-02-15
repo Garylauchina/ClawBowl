@@ -7,7 +7,7 @@ struct ChatView: View {
         Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")
     ]
     @State private var inputText = ""
-    @State private var selectedImage: UIImage?
+    @State private var selectedAttachment: Attachment?
     @State private var isLoading = false
     @State private var showClearAlert = false
     @State private var showLogoutAlert = false
@@ -45,7 +45,7 @@ struct ChatView: View {
                 // 输入栏
                 ChatInputBar(
                     text: $inputText,
-                    selectedImage: $selectedImage,
+                    selectedAttachment: $selectedAttachment,
                     isLoading: isLoading
                 ) {
                     sendMessage()
@@ -92,29 +92,33 @@ struct ChatView: View {
 
     private func sendMessage() {
         let content = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let image = selectedImage
-        guard !content.isEmpty || image != nil else { return }
+        let attachment = selectedAttachment
+        guard !content.isEmpty || attachment != nil else { return }
         guard !isLoading else { return }
 
         // 清空输入
         inputText = ""
-        selectedImage = nil
+        selectedAttachment = nil
         isLoading = true
 
         Task {
             do {
-                // 压缩图片
-                var compressedData: Data?
-                if let img = image {
-                    compressedData = await ChatService.shared.compressImage(img)
+                // 添加用户消息
+                let displayText: String
+                if content.isEmpty {
+                    if let att = attachment {
+                        displayText = att.isImage ? "[图片]" : "[文件: \(att.filename)]"
+                    } else {
+                        displayText = ""
+                    }
+                } else {
+                    displayText = content
                 }
 
-                // 添加用户消息
-                let displayText = content.isEmpty && image != nil ? "[图片]" : content
                 let userMessage = Message(
                     role: .user,
                     content: displayText,
-                    imageData: compressedData
+                    attachment: attachment
                 )
                 await MainActor.run {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -141,7 +145,7 @@ struct ChatView: View {
                 // 发起 SSE 流式请求
                 let stream = try await ChatService.shared.sendMessageStream(
                     content,
-                    imageData: compressedData,
+                    attachment: attachment,
                     history: historyMessages
                 )
 
@@ -164,7 +168,6 @@ struct ChatView: View {
                 await MainActor.run {
                     if let idx = messages.firstIndex(where: { $0.id == placeholderID }) {
                         messages[idx].isStreaming = false
-                        // 如果内容为空说明 OpenClaw 没返回有效内容
                         if messages[idx].content.isEmpty && messages[idx].thinkingText.isEmpty {
                             messages[idx].content = "AI 未返回内容，请重试。"
                             messages[idx].status = .error
@@ -174,7 +177,6 @@ struct ChatView: View {
                 }
             } catch {
                 await MainActor.run {
-                    // 如果已有占位消息，更新为错误；否则新增
                     if let lastIdx = messages.indices.last,
                        messages[lastIdx].role == .assistant && messages[lastIdx].isStreaming {
                         messages[lastIdx].content = "抱歉，出了点问题：\(error.localizedDescription)。请稍后重试。"
@@ -201,7 +203,7 @@ struct ChatView: View {
             messages = [
                 Message(role: .assistant, content: "聊天记录已清空。有什么可以帮你的吗？")
             ]
-            selectedImage = nil
+            selectedAttachment = nil
         }
         Task {
             await ChatService.shared.resetSession()

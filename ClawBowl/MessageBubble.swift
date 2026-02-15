@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 单条消息气泡视图（支持文本和图片）
+/// 单条消息气泡视图（支持文本、图片和文件附件）
 struct MessageBubble: View {
     let message: Message
 
@@ -13,14 +13,36 @@ struct MessageBubble: View {
             VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 4) {
                 // 气泡内容
                 VStack(alignment: .leading, spacing: 6) {
-                    // 图片（如果有）
-                    if let imageData = message.imageData,
-                       let uiImage = UIImage(data: imageData) {
-                        Image(uiImage: uiImage)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxWidth: 240, maxHeight: 240)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    // 附件（图片缩略图 或 文件图标+文件名）
+                    if let att = message.attachment {
+                        if att.isImage, let uiImage = UIImage(data: att.data) {
+                            Image(uiImage: uiImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxWidth: 240, maxHeight: 240)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        } else {
+                            // 文件附件
+                            HStack(spacing: 8) {
+                                Image(systemName: fileIcon(for: att.mimeType))
+                                    .font(.title2)
+                                    .foregroundStyle(message.role == .user ? .white.opacity(0.9) : .blue)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(att.filename)
+                                        .font(.caption)
+                                        .foregroundColor(message.role == .user ? .white : .primary)
+                                        .lineLimit(1)
+                                    Text(att.formattedSize)
+                                        .font(.caption2)
+                                        .foregroundColor(message.role == .user ? .white.opacity(0.7) : .secondary)
+                                }
+                            }
+                            .padding(6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(message.role == .user ? Color.white.opacity(0.15) : Color(.systemGray5))
+                            )
+                        }
                     }
 
                     // 思考状态（浅色斜体小字，类似 Claude 的思考过程）
@@ -57,10 +79,11 @@ struct MessageBubble: View {
                     } label: {
                         Label("复制文字", systemImage: "doc.on.doc")
                     }
-                    if message.imageData != nil {
+                    if message.hasImage {
                         Button {
-                            if let imgData = message.imageData,
-                               let img = UIImage(data: imgData) {
+                            if let att = message.attachment,
+                               att.isImage,
+                               let img = UIImage(data: att.data) {
                                 UIPasteboard.general.image = img
                             }
                         } label: {
@@ -123,6 +146,30 @@ struct MessageBubble: View {
             )
             .clipShape(Circle())
     }
+
+    /// 根据 MIME type 返回合适的 SF Symbol
+    private func fileIcon(for mimeType: String) -> String {
+        switch mimeType {
+        case let m where m.contains("pdf"):
+            return "doc.richtext"
+        case let m where m.contains("word") || m.contains("document"):
+            return "doc.text"
+        case let m where m.contains("spreadsheet") || m.contains("excel"):
+            return "tablecells"
+        case let m where m.contains("presentation") || m.contains("powerpoint"):
+            return "rectangle.split.3x3"
+        case let m where m.contains("text") || m.contains("json") || m.contains("xml") || m.contains("csv"):
+            return "doc.plaintext"
+        case let m where m.contains("zip") || m.contains("archive") || m.contains("compressed"):
+            return "doc.zipper"
+        case let m where m.contains("audio"):
+            return "waveform"
+        case let m where m.contains("video"):
+            return "film"
+        default:
+            return "doc"
+        }
+    }
 }
 
 /// 自定义气泡形状（带尖角）
@@ -136,7 +183,6 @@ struct BubbleShape: Shape {
         var path = Path()
 
         if isUser {
-            // 用户气泡：右下角尖角
             path.addRoundedRect(
                 in: CGRect(x: rect.minX, y: rect.minY, width: rect.width - tailSize, height: rect.height),
                 cornerSize: CGSize(width: radius, height: radius)
@@ -145,7 +191,6 @@ struct BubbleShape: Shape {
             path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
             path.addLine(to: CGPoint(x: rect.maxX - tailSize - 8, y: rect.maxY))
         } else {
-            // AI 气泡：左下角尖角
             path.addRoundedRect(
                 in: CGRect(x: rect.minX + tailSize, y: rect.minY, width: rect.width - tailSize, height: rect.height),
                 cornerSize: CGSize(width: radius, height: radius)
@@ -179,6 +224,11 @@ struct StreamingCursor: View {
     VStack {
         MessageBubble(message: Message(role: .user, content: "你好！"))
         MessageBubble(message: Message(role: .assistant, content: "你好！有什么可以帮你的吗？"))
+        MessageBubble(message: Message(
+            role: .user,
+            content: "请看这个文件",
+            attachment: Attachment(filename: "report.pdf", data: Data(), mimeType: "application/pdf")
+        ))
         MessageBubble(message: Message(
             role: .assistant,
             content: "",

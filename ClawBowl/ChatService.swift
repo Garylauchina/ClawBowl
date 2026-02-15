@@ -17,28 +17,24 @@ actor ChatService {
 
     private let baseURL = "https://prometheusclothing.net/api/v2/chat"
 
-    /// 图片压缩：长边最大像素（确保 base64 后 < 800KB）
-    private let maxImageDimension: CGFloat = 512
-    /// 图片压缩：JPEG 质量
-    private let jpegQuality: CGFloat = 0.4
-
     private init() {}
 
     // MARK: - Build request messages (shared by both modes)
 
-    /// 构建 API 请求消息列表
+    /// 构建 API 请求消息列表（支持图片和通用文件附件）
     private func buildRequestMessages(
         content: String,
-        imageData: Data?,
+        attachment: Attachment?,
         history: [Message]
     ) -> [ChatCompletionRequest.RequestMessage] {
         var requestMessages: [ChatCompletionRequest.RequestMessage] = []
 
-        // 历史消息（最近 20 条），图片用文本标记代替
+        // 历史消息（最近 20 条），附件用文本标记代替
         let recentHistory = history.suffix(20)
         for msg in recentHistory {
-            if msg.imageData != nil {
-                let text = msg.content.isEmpty ? "[图片]" : "\(msg.content)\n[图片]"
+            if let att = msg.attachment {
+                let label = att.isImage ? "[图片]" : "[文件: \(att.filename)]"
+                let text = msg.content.isEmpty ? label : "\(msg.content)\n\(label)"
                 requestMessages.append(.init(role: msg.role.rawValue, content: .text(text)))
             } else {
                 requestMessages.append(.init(role: msg.role.rawValue, content: .text(msg.content)))
@@ -46,13 +42,20 @@ actor ChatService {
         }
 
         // 当前消息
-        if let imgData = imageData {
-            let base64 = imgData.base64EncodedString()
+        if let att = attachment {
             var parts: [ContentPart] = []
             if !content.isEmpty {
                 parts.append(.textPart(content))
             }
-            parts.append(.imagePart(base64: base64))
+            if att.isImage {
+                // 图片：OpenAI Vision 格式
+                let base64 = att.data.base64EncodedString()
+                parts.append(.imagePart(base64: base64, mimeType: att.mimeType))
+            } else {
+                // 通用文件：自定义 file 格式
+                let base64 = att.data.base64EncodedString()
+                parts.append(.filePart(base64: base64, filename: att.filename, mimeType: att.mimeType))
+            }
             requestMessages.append(.init(role: "user", content: .multimodal(parts)))
         } else {
             requestMessages.append(.init(role: "user", content: .text(content)))
@@ -106,30 +109,7 @@ actor ChatService {
         }
     }
 
-    // MARK: - Non-streaming (legacy, kept as fallback)
-
-    /// 发送消息并获取 AI 回复（非流式，一次性返回）
-    func sendMessage(_ content: String, imageData: Data? = nil, history: [Message]) async throws -> String {
-        guard let token = await AuthService.shared.accessToken else {
-            throw ChatError.notAuthenticated
-        }
-
-        let requestMessages = buildRequestMessages(content: content, imageData: imageData, history: history)
-        let request = try buildURLRequest(messages: requestMessages, stream: false, token: token)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validateHTTPResponse(response)
-
-        let decoder = JSONDecoder()
-        let completionResponse = try decoder.decode(ChatCompletionResponse.self, from: data)
-
-        guard let replyContent = completionResponse.choices?.first?.message?.content else {
-            throw ChatError.emptyResponse
-        }
-        return replyContent
-    }
-
-    // MARK: - Streaming (SSE)
+    // MARK: - Streaming (SSE) — primary mode
 
     /// 发送消息并以 SSE 流式接收 AI 回复
     ///
@@ -139,14 +119,14 @@ actor ChatService {
     /// - `.done` → 流结束
     func sendMessageStream(
         _ content: String,
-        imageData: Data? = nil,
+        attachment: Attachment? = nil,
         history: [Message]
     ) async throws -> AsyncThrowingStream<StreamEvent, Error> {
         guard let token = await AuthService.shared.accessToken else {
             throw ChatError.notAuthenticated
         }
 
-        let requestMessages = buildRequestMessages(content: content, imageData: imageData, history: history)
+        let requestMessages = buildRequestMessages(content: content, attachment: attachment, history: history)
         let request = try buildURLRequest(messages: requestMessages, stream: true, token: token)
 
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -196,26 +176,6 @@ actor ChatService {
                 task.cancel()
             }
         }
-    }
-
-    // MARK: - Image compression
-
-    /// 压缩图片：缩放到最大尺寸并转为 JPEG
-    func compressImage(_ image: UIImage) -> Data? {
-        let maxDim = maxImageDimension
-        var targetSize = image.size
-
-        // 等比缩放
-        if max(targetSize.width, targetSize.height) > maxDim {
-            let scale = maxDim / max(targetSize.width, targetSize.height)
-            targetSize = CGSize(width: targetSize.width * scale, height: targetSize.height * scale)
-        }
-
-        let renderer = UIGraphicsImageRenderer(size: targetSize)
-        let resized = renderer.image { _ in
-            image.draw(in: CGRect(origin: .zero, size: targetSize))
-        }
-        return resized.jpegData(compressionQuality: jpegQuality)
     }
 
     // MARK: - Session management

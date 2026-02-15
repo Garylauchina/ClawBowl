@@ -1,11 +1,11 @@
 """HTTP reverse proxy to forward chat requests to user's OpenClaw container.
 
-图片处理策略（遵循 DESIGN.md 第 8 节）：
+附件处理策略（遵循 DESIGN.md）：
 - 纯文本消息：直接转发给 OpenClaw agent
-- 含图片消息：
-  1. 提取 base64 图片 → 保存到容器工作区 media/inbound/{filename}
+- 含附件消息（图片或文件）：
+  1. 提取 base64 附件 → 保存到容器工作区 media/inbound/{filename}
   2. 向 OpenClaw 发送引用消息：[用户发送了文件: media/inbound/{filename}]
-  3. OpenClaw 容器内自行调用 image 工具分析图片
+  3. OpenClaw 容器内自行调用 image/read 等工具处理
 
 流式响应：
 - proxy_chat_stream() 以 SSE 格式逐行返回 OpenClaw 的流式输出
@@ -46,12 +46,15 @@ _TOOL_STATUS_MAP: dict[str, str] = {
 }
 
 
-def _extract_images_and_text(messages: list[dict]) -> tuple[list[dict], list[tuple[str, bytes]], bool]:
-    """分析 messages，提取最后一条用户消息中的图片和文本。
+def _extract_attachments(messages: list[dict]) -> tuple[list[dict], list[tuple[str, bytes]], bool]:
+    """分析 messages，提取最后一条用户消息中的附件（图片 + 通用文件）。
+
+    支持两种附件格式：
+    - type="image_url"：OpenAI Vision 格式的 base64 图片
+    - type="file"：自定义格式的通用文件 (filename, mime_type, data)
 
     Returns:
-        (messages_without_last_user, [(filename, image_bytes), ...], has_image)
-        如果有图片，messages_without_last_user 不含最后一条用户消息（需要重建）。
+        (messages, [(filename, file_bytes), ...], has_attachments)
     """
     # 找到最后一条用户消息
     last_user_idx = -1
@@ -67,20 +70,21 @@ def _extract_images_and_text(messages: list[dict]) -> tuple[list[dict], list[tup
     if not isinstance(content, list):
         return messages, [], False
 
-    # 提取图片和文本
-    images: list[tuple[str, bytes]] = []
-    user_texts: list[str] = []
+    # 提取附件和文本
+    attachments: list[tuple[str, bytes]] = []
 
     for part in content:
         if not isinstance(part, dict):
             continue
-        if part.get("type") == "image_url":
+
+        part_type = part.get("type", "")
+
+        # ── 图片 (OpenAI Vision 格式) ──
+        if part_type == "image_url":
             url = part.get("image_url", {}).get("url", "")
             if url.startswith("data:"):
-                # data:image/jpeg;base64,xxxxx
                 try:
                     header, b64data = url.split(",", 1)
-                    # Determine extension from MIME type
                     ext = "jpg"
                     if "png" in header:
                         ext = "png"
@@ -89,49 +93,56 @@ def _extract_images_and_text(messages: list[dict]) -> tuple[list[dict], list[tup
                     elif "webp" in header:
                         ext = "webp"
                     filename = f"{uuid.uuid4().hex[:12]}.{ext}"
-                    image_bytes = base64.b64decode(b64data)
-                    images.append((filename, image_bytes))
+                    file_bytes = base64.b64decode(b64data)
+                    attachments.append((filename, file_bytes))
                 except Exception:
                     logger.warning("Failed to decode base64 image")
-        elif part.get("type") == "text":
-            text = part.get("text", "").strip()
-            if text:
-                user_texts.append(text)
 
-    if not images:
+        # ── 通用文件 ──
+        elif part_type == "file":
+            try:
+                filename = part.get("filename", f"{uuid.uuid4().hex[:12]}.bin")
+                b64data = part.get("data", "")
+                file_bytes = base64.b64decode(b64data)
+                attachments.append((filename, file_bytes))
+            except Exception:
+                logger.warning("Failed to decode base64 file: %s", part.get("filename"))
+
+    if not attachments:
         return messages, [], False
 
-    return messages, images, True
+    return messages, attachments, True
 
 
-def _save_images_to_workspace(
-    instance: OpenClawInstance, images: list[tuple[str, bytes]]
+def _save_attachments_to_workspace(
+    instance: OpenClawInstance, attachments: list[tuple[str, bytes]]
 ) -> list[str]:
-    """将图片保存到容器工作区的 media/inbound/ 目录。
+    """将附件保存到容器工作区的 media/inbound/ 目录。
 
     Returns:
-        保存后的相对路径列表，如 ['media/inbound/abc123.jpg']
+        保存后的相对路径列表，如 ['media/inbound/report.pdf']
     """
     workspace_dir = Path(instance.data_path) / "workspace"
     inbound_dir = workspace_dir / "media" / "inbound"
     inbound_dir.mkdir(parents=True, exist_ok=True)
 
     saved_paths: list[str] = []
-    for filename, image_bytes in images:
-        file_path = inbound_dir / filename
-        file_path.write_bytes(image_bytes)
-        relative_path = f"media/inbound/{filename}"
+    for filename, file_bytes in attachments:
+        # 确保文件名安全（去掉路径分隔符）
+        safe_name = filename.replace("/", "_").replace("\\", "_")
+        file_path = inbound_dir / safe_name
+        file_path.write_bytes(file_bytes)
+        relative_path = f"media/inbound/{safe_name}"
         saved_paths.append(relative_path)
-        logger.info("Saved image to workspace: %s (%d bytes)", relative_path, len(image_bytes))
+        logger.info("Saved attachment to workspace: %s (%d bytes)", relative_path, len(file_bytes))
 
     return saved_paths
 
 
 def _rebuild_messages_with_file_refs(
-    messages: list[dict], image_paths: list[str], user_texts: list[str]
+    messages: list[dict], file_paths: list[str]
 ) -> list[dict]:
-    """将最后一条含图片的用户消息替换为文件引用消息。"""
-    # 找到最后一条用户消息并替换
+    """将最后一条含附件的用户消息替换为文件引用消息。"""
     new_messages: list[dict] = []
     replaced = False
 
@@ -145,12 +156,12 @@ def _rebuild_messages_with_file_refs(
             new_messages.append(msg)
             continue
 
-        # 检查是否含图片
-        has_img = any(
-            isinstance(p, dict) and p.get("type") == "image_url"
+        # 检查是否含附件
+        has_attachment = any(
+            isinstance(p, dict) and p.get("type") in ("image_url", "file")
             for p in content
         )
-        if not has_img:
+        if not has_attachment:
             new_messages.append(msg)
             continue
 
@@ -164,7 +175,7 @@ def _rebuild_messages_with_file_refs(
 
         # 构建引用消息
         file_refs = "\n".join(
-            f"[用户发送了文件: {path}]" for path in image_paths
+            f"[用户发送了文件: {path}]" for path in file_paths
         )
         combined = file_refs
         if user_text:
@@ -176,36 +187,23 @@ def _rebuild_messages_with_file_refs(
     return new_messages
 
 
-def _preprocess_images(
+def _preprocess_attachments(
     instance: OpenClawInstance, messages: list[dict]
 ) -> list[dict]:
-    """Handle multimodal messages: save images to workspace, replace with file refs.
+    """Handle multimodal messages: save attachments to workspace, replace with file refs.
 
-    共享的图片预处理逻辑，供 proxy_chat_request 和 proxy_chat_stream 复用。
+    统一处理图片和文件附件，供 proxy_chat_request 和 proxy_chat_stream 复用。
     """
-    messages, images, has_image = _extract_images_and_text(messages)
-    if not has_image:
+    messages, attachments, has_attachments = _extract_attachments(messages)
+    if not has_attachments:
         return messages
 
-    # 1. 保存图片到容器工作区
-    image_paths = _save_images_to_workspace(instance, images)
-    logger.info("Saved %d image(s) to workspace: %s", len(image_paths), image_paths)
+    # 1. 保存附件到容器工作区
+    file_paths = _save_attachments_to_workspace(instance, attachments)
+    logger.info("Saved %d attachment(s) to workspace: %s", len(file_paths), file_paths)
 
-    # 2. 提取用户文本
-    user_texts: list[str] = []
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content")
-            if isinstance(content, list):
-                for p in content:
-                    if isinstance(p, dict) and p.get("type") == "text":
-                        t = p.get("text", "").strip()
-                        if t:
-                            user_texts.append(t)
-            break
-
-    # 3. 重建消息（替换图片为文件引用）
-    return _rebuild_messages_with_file_refs(messages, image_paths, user_texts)
+    # 2. 重建消息（替换附件为文件引用）
+    return _rebuild_messages_with_file_refs(messages, file_paths)
 
 
 # ── Shared constants ──────────────────────────────────────────────────
@@ -242,7 +240,7 @@ async def proxy_chat_request(
     stream: bool = False,
 ) -> dict:
     """Forward a chat completion request to the user's OpenClaw gateway (non-streaming)."""
-    messages = _preprocess_images(instance, messages)
+    messages = _preprocess_attachments(instance, messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream)
 
     # Retry once on connection errors (gateway may still be warming up)
@@ -283,7 +281,7 @@ async def proxy_chat_stream(
     - delta.tool_calls 行转换为 delta.thinking 状态行
     - data: [DONE] 最终透传
     """
-    messages = _preprocess_images(instance, messages)
+    messages = _preprocess_attachments(instance, messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream=True)
 
     seen_tools: set[str] = set()  # avoid duplicate status for same tool call
