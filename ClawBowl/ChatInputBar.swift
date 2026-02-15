@@ -2,8 +2,10 @@ import SwiftUI
 import PhotosUI
 import UniformTypeIdentifiers
 import UIKit
+import Speech
+import AVFoundation
 
-/// 底部聊天输入栏（支持图片和文件附件）
+/// 底部聊天输入栏（支持图片、文件附件、语音输入）
 struct ChatInputBar: View {
     @Binding var text: String
     @Binding var selectedAttachment: Attachment?
@@ -16,6 +18,9 @@ struct ChatInputBar: View {
     @State private var showFileTooLargeAlert = false
     @State private var rejectedFileName = ""
 
+    // ── 语音输入状态 ──
+    @StateObject private var speechManager = SpeechRecognitionManager()
+
     /// 文件大小限制 10MB
     private let maxFileSize = 10 * 1024 * 1024
 
@@ -24,6 +29,11 @@ struct ChatInputBar: View {
             // 附件预览条
             if let att = selectedAttachment {
                 attachmentPreview(att)
+            }
+
+            // 录音状态提示条
+            if speechManager.isRecording {
+                recordingIndicator
             }
 
             // 输入行
@@ -37,7 +47,7 @@ struct ChatInputBar: View {
                         .foregroundStyle(selectedAttachment?.isImage == true ? .blue : .secondary)
                         .frame(width: 32, height: 36)
                 }
-                .disabled(isLoading)
+                .disabled(isLoading || speechManager.isRecording)
 
                 // 文件选择按钮（回形针）
                 Button {
@@ -48,10 +58,10 @@ struct ChatInputBar: View {
                         .foregroundStyle(selectedAttachment != nil && !(selectedAttachment!.isImage) ? .blue : .secondary)
                         .frame(width: 32, height: 36)
                 }
-                .disabled(isLoading)
+                .disabled(isLoading || speechManager.isRecording)
 
                 // 输入框
-                TextField(isLoading ? "AI 正在处理..." : "输入消息...", text: $text, axis: .vertical)
+                TextField(inputPlaceholder, text: $text, axis: .vertical)
                     .lineLimit(1...5)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
@@ -65,13 +75,28 @@ struct ChatInputBar: View {
                         }
                     }
 
-                // 发送按钮
-                Button(action: onSend) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 34))
-                        .foregroundStyle(canSend ? .blue : .gray.opacity(0.4))
+                // 语音按钮 / 发送按钮（智能切换）
+                if canSend {
+                    // 有内容时显示发送按钮
+                    Button(action: onSend) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 34))
+                            .foregroundStyle(.blue)
+                    }
+                } else {
+                    // 无内容时显示语音按钮
+                    Button {
+                        toggleRecording()
+                    } label: {
+                        Image(systemName: speechManager.isRecording ? "mic.fill" : "mic")
+                            .font(.system(size: 20))
+                            .foregroundStyle(speechManager.isRecording ? .red : .secondary)
+                            .frame(width: 34, height: 34)
+                            .background(speechManager.isRecording ? Color.red.opacity(0.15) : Color.clear)
+                            .clipShape(Circle())
+                    }
+                    .disabled(isLoading)
                 }
-                .disabled(!canSend)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -95,6 +120,52 @@ struct ChatInputBar: View {
         } message: {
             Text("\"\(rejectedFileName)\" 超过 10MB 限制，请选择较小的文件。")
         }
+        .alert("无法使用语音", isPresented: $speechManager.showPermissionAlert) {
+            Button("去设置", role: .none) {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(speechManager.permissionMessage)
+        }
+        .onChange(of: speechManager.transcribedText) { _, newValue in
+            if !newValue.isEmpty {
+                text = newValue
+            }
+        }
+    }
+
+    // MARK: - 录音状态指示条
+
+    private var recordingIndicator: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(.red)
+                .frame(width: 8, height: 8)
+                .opacity(speechManager.isRecording ? 1 : 0)
+                .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: speechManager.isRecording)
+            Text("正在听取语音...")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Spacer()
+            Button("取消") {
+                speechManager.stopRecording()
+                text = ""
+            }
+            .font(.caption)
+            .foregroundColor(.red)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(Color(.systemGray6).opacity(0.5))
+    }
+
+    private var inputPlaceholder: String {
+        if isLoading { return "AI 正在处理..." }
+        if speechManager.isRecording { return "语音识别中..." }
+        return "输入消息..."
     }
 
     /// 附件预览条（图片缩略图 或 文件图标+文件名）
@@ -143,6 +214,16 @@ struct ChatInputBar: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(Color(.systemGray6).opacity(0.5))
+    }
+
+    // MARK: - 语音录制控制
+
+    private func toggleRecording() {
+        if speechManager.isRecording {
+            speechManager.stopRecording()
+        } else {
+            speechManager.startRecording()
+        }
     }
 
     /// 有文字或有附件即可发送
@@ -318,6 +399,143 @@ struct DocumentPicker: UIViewControllerRepresentable {
             }
             return "application/octet-stream"
         }
+    }
+}
+
+// MARK: - Speech Recognition Manager
+
+/// 语音识别管理器：使用 iOS Speech 框架进行本地实时转写
+class SpeechRecognitionManager: ObservableObject {
+    @Published var isRecording = false
+    @Published var transcribedText = ""
+    @Published var showPermissionAlert = false
+    @Published var permissionMessage = ""
+
+    private var speechRecognizer: SFSpeechRecognizer?
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private let audioEngine = AVAudioEngine()
+
+    init() {
+        speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+    }
+
+    func startRecording() {
+        // 检查语音识别权限
+        SFSpeechRecognizer.requestAuthorization { [weak self] status in
+            DispatchQueue.main.async {
+                switch status {
+                case .authorized:
+                    self?.checkMicrophoneAndStart()
+                case .denied, .restricted:
+                    self?.permissionMessage = "请在系统设置中允许 ClawBowl 使用语音识别功能。"
+                    self?.showPermissionAlert = true
+                case .notDetermined:
+                    break
+                @unknown default:
+                    break
+                }
+            }
+        }
+    }
+
+    private func checkMicrophoneAndStart() {
+        AVAudioApplication.requestRecordPermission { [weak self] granted in
+            DispatchQueue.main.async {
+                if granted {
+                    self?.beginRecording()
+                } else {
+                    self?.permissionMessage = "请在系统设置中允许 ClawBowl 使用麦克风。"
+                    self?.showPermissionAlert = true
+                }
+            }
+        }
+    }
+
+    private func beginRecording() {
+        // 如果有正在进行的任务，先停止
+        if recognitionTask != nil {
+            recognitionTask?.cancel()
+            recognitionTask = nil
+        }
+
+        guard let speechRecognizer = speechRecognizer, speechRecognizer.isAvailable else {
+            permissionMessage = "语音识别服务暂不可用，请稍后再试。"
+            showPermissionAlert = true
+            return
+        }
+
+        // 配置音频会话
+        let audioSession = AVAudioSession.sharedInstance()
+        do {
+            try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            return
+        }
+
+        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
+        guard let recognitionRequest = recognitionRequest else { return }
+
+        // 启用实时转写（边说边出文字）
+        recognitionRequest.shouldReportPartialResults = true
+
+        // 如果设备支持，使用离线识别
+        if #available(iOS 13, *) {
+            if speechRecognizer.supportsOnDeviceRecognition {
+                recognitionRequest.requiresOnDeviceRecognition = true
+            }
+        }
+
+        recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
+            guard let self = self else { return }
+
+            if let result = result {
+                DispatchQueue.main.async {
+                    self.transcribedText = result.bestTranscription.formattedString
+                }
+            }
+
+            if error != nil || (result?.isFinal ?? false) {
+                DispatchQueue.main.async {
+                    self.stopAudioEngine()
+                    self.isRecording = false
+                }
+            }
+        }
+
+        // 配置音频输入
+        let inputNode = audioEngine.inputNode
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
+            self.recognitionRequest?.append(buffer)
+        }
+
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+            DispatchQueue.main.async {
+                self.transcribedText = ""
+                self.isRecording = true
+            }
+        } catch {
+            stopAudioEngine()
+        }
+    }
+
+    func stopRecording() {
+        recognitionRequest?.endAudio()
+        stopAudioEngine()
+        DispatchQueue.main.async {
+            self.isRecording = false
+        }
+    }
+
+    private func stopAudioEngine() {
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        recognitionRequest = nil
+        recognitionTask = nil
     }
 }
 

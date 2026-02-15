@@ -1,6 +1,6 @@
-# ClawBowl 系统设计文档（V2）
+# ClawBowl 系统设计文档（V3）
 
-> 最后更新：2026-02-14
+> 最后更新：2026-02-15
 
 ---
 
@@ -238,7 +238,75 @@ cache/                           # 临时缓存
 
 ---
 
-## 9. 前端上下文管理
+## 9. 前端设计哲学
+
+### 9.1 极简原则
+
+**核心理念：上下文管理是 AI 的工作，不是用户的工作。**
+
+ClawBowl 的前端永远只有一个对话窗口，不展示多个对话线程。这与 ChatGPT、Claude 等产品的设计理念根本不同：
+
+| 传统 AI 产品 | ClawBowl |
+|---|---|
+| 多个对话线程，用户手动切换 | **单一对话流**，AI 自动管理上下文 |
+| 用户需要决定"这个问题属于哪个对话" | **用户只需说话**，AI 自动关联历史 |
+| 上下文切换是用户操作 | 上下文切换由 memory_search 自动完成 |
+| 对话历史 = 用户整理的线程列表 | 对话历史 = **AI 的记忆**（分类存储，按需调取） |
+
+**UI 布局**：
+```
+┌─────────────────────────┐
+│  [状态栏]               │
+│                         │
+│  💬 消息流（单线程）      │
+│                         │
+│  📎  🎤  [输入框]  ➤    │
+└─────────────────────────┘
+```
+
+仅 4 个交互元素：附件按钮、语音按钮、文本输入框、发送按钮。
+
+### 9.2 语音输入
+
+**方案：iOS 本地转写（Speech 框架）**
+
+```
+用户按住🎤 → iOS Speech 实时转写 → 文字填入输入框 → 用户确认发送
+```
+
+- 使用 iOS 内置 Speech 框架，中文识别准确率高
+- 零上传成本，毫秒级转写，支持离线
+- 对后端完全透明——就是一条普通文本消息
+- 未来可扩展：语音情感分析、声纹识别（Phase 5 挂载音频处理模块）
+
+### 9.3 iOS 原生功能集成（规划中）
+
+Agent 回复中可夹带**结构化指令**，iOS App 解析后执行本地操作：
+
+```
+用户："帮我在日历上添加明天下午3点的会议"
+  → Agent 理解意图
+  → 返回：{ "action": "calendar_add", "title": "会议", "date": "..." }
+  → iOS 调用 EventKit → 完成
+  → App 回复 Agent："已添加到日历"
+```
+
+| 功能 | iOS 框架 | 可行性 | 阶段 |
+|---|---|---|---|
+| 日历（增删改查） | EventKit | ✅ 完全可以 | Phase 3 |
+| 提醒事项/备忘 | EventKit (Reminders) | ✅ 完全可以 | Phase 3 |
+| 定时提醒（代替闹钟） | UNUserNotificationCenter | ✅ 本地推送 | Phase 3 |
+| 打开其他 App | URL Scheme | ✅ 有限支持 | Phase 3 |
+| Siri 快捷指令 | App Intents (iOS 16+) | ✅ 可以 | Phase 4 |
+| 通讯录 | Contacts 框架 | ✅ 需授权 | Phase 4 |
+| 位置服务 | CoreLocation | ✅ 需授权 | Phase 4 |
+| 健康数据 | HealthKit | ✅ 需授权 | Phase 5 |
+
+注：iOS 没有公开闹钟 API，用本地推送通知替代，效果相同。
+
+---
+
+## 10. 前端上下文管理
 
 ### 9.1 架构（混合方案）
 
@@ -255,9 +323,9 @@ cache/                           # 临时缓存
 
 ---
 
-## 10. OpenClaw 能力清单
+## 11. OpenClaw 能力清单
 
-### 10.1 内置工具
+### 11.1 内置工具
 
 | 工具 | 功能 | 资源消耗 |
 |------|------|---------|
@@ -276,7 +344,7 @@ cache/                           # 临时缓存
 | sessions_* | 多会话管理 | 低 |
 | gateway | 网关配置管理 | 极低 |
 
-### 10.2 扩展能力
+### 11.2 扩展能力
 
 - **技能系统**：SKILL.md 注入系统提示词，ClawHub 社区技能市场
 - **记忆系统**：Markdown 文件 + BM25/向量混合检索
@@ -284,7 +352,7 @@ cache/                           # 临时缓存
 
 ---
 
-## 11. 订阅分级模型
+## 12. 订阅分级模型
 
 ### Free —— 基础助手
 
@@ -342,7 +410,7 @@ cache/                           # 临时缓存
 
 ---
 
-## 12. 安全边界
+## 13. 安全边界
 
 容器必须：
 - 非 privileged
@@ -357,7 +425,7 @@ Secrets：
 
 ---
 
-## 13. 升级策略
+## 14. 升级策略
 
 - 不使用 `latest` tag
 - 明确 `desired_version`
@@ -367,7 +435,7 @@ Secrets：
 
 ---
 
-## 14. 与 Manus 沙盒的差异
+## 15. 与 Manus 沙盒的差异
 
 | 维度 | Manus | ClawBowl |
 |------|-------|----------|
@@ -383,7 +451,7 @@ Secrets：
 
 ---
 
-## 15. 技术栈
+## 16. 技术栈
 
 | 层 | 技术 |
 |----|------|
@@ -397,20 +465,172 @@ Secrets：
 
 ---
 
-## 16. 当前阶段实施优先级
+## 17. 产品定位与竞品差异
 
-**立即做**：
-1. 修复容器目录结构（对齐 `/root/.openclaw/`）
-2. 多模态文件 inbox 机制（替代视觉模型预处理）
-3. 前端上下文管理（SwiftData 缓存 + 后端历史 API + 分页加载）
-4. Runtime 创建 + Snapshot#1
-5. 周期 Checkpoint
+### 16.1 产品定位
 
-**1.0 后做**：
-1. 崩溃恢复
-2. 蓝绿升级
-3. 手动 reset
-4. 订阅分级实施（Pro/Premium 模板）
+**ClawBowl = 个人 AI 助理操作系统**
+
+不同于 Manus（一次性任务执行器）或 ChatGPT（无状态对话），ClawBowl 提供的是：
+- 一个**持久化**的 AI 助理，越用越了解你
+- 一个**固定沙盒**，工具和环境持续积累
+- 一个**可版本化的数字灵魂**，可备份、可恢复、可升级
+
+### 16.2 与竞品对比
+
+| 维度 | ChatGPT | Manus | ClawBowl |
+|---|---|---|---|
+| 沙盒 | 无（临时代码执行） | 临时（任务级） | **固定（用户级，持久化）** |
+| 记忆 | 有限（摘要式） | 无 | **完整（文件级 + 语义搜索）** |
+| 工具执行 | Code Interpreter | 多线程沙盒 | **持久沙盒（工具累积）** |
+| 自动化 | 无 | 无 | **cron + heartbeat** |
+| 浏览器 | 无 | 有 | **有（Chromium 自动化）** |
+| 个性化 | 低 | 无 | **高（SOUL.md + USER.md）** |
+| 多模态 | 图片/文件 | 图片/文件 | **图片/文件 + 持久处理环境** |
+| 用户关系 | 无状态 | 任务级 | **长期关系，持续成长** |
+| 部署 | 云端 | 云端 | **独立容器，数据自主** |
+
+### 16.3 核心架构策略
+
+**前端收敛**：不使用 OpenClaw 的 8+ 消息通道，统一通过自有 iOS App 对接用户。
+- 用户体验完全可控
+- 减少多平台适配复杂度
+- 用户数据完整自主
+
+**后端模块化（微内核架构）**：
+```
+iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py）
+                           ├── LLM 管理模块（模型切换、计费、限流）
+                           ├── 记忆模块（OpenClaw 内置，可替换）
+                           ├── 用户数据模块（认证、配额、偏好）
+                           └── 沙盒管理模块（Docker 生命周期）
+```
+
+**OpenClaw 定位**：当前作为"能力底座"使用，所有接口抽象化，未来可替换为自建或其他框架。
+
+---
+
+## 18. OpenClaw 功能激活路径
+
+### Phase 0 — 核心基础 ✅（已完成）
+
+| 能力 | 说明 | 状态 |
+|---|---|---|
+| 文本对话 | DeepSeek V3.2 via ZenMux | ✅ |
+| 文件处理 | read/write/edit + exec | ✅ |
+| 图片分析 | GLM 4.6V Flash 视觉模型 | ✅ |
+| 通用附件 | 任意文件 → workspace → agent 处理 | ✅ |
+| 网页搜索 | Brave Search（免费额度） | ✅ |
+| 网页读取 | web_fetch + Readability | ✅ |
+| 持久会话 | user + session-key → 跨请求复用 session | ✅ |
+| 记忆系统 | MEMORY.md + memory/ 日记 + memory_search | ✅ |
+| 工具记忆 | TOOLS.md 自动更新 | ✅ |
+| 推理展示 | thinking 浅色字体 + 最终 content 分离 | ✅ |
+
+### Phase 1 — 自主能力（下一步）
+
+目标：agent 从"被动回答"进化为"主动行动"。
+
+| 能力 | 实现方式 | 前端改动 | 后端改动 | 优先级 |
+|---|---|---|---|---|
+| **Cron 定时任务** | 启用 cron 工具 + HEARTBEAT.md | 添加"定时任务"管理 UI | openclaw.json 启用 cron | ⭐⭐⭐ |
+| **Heartbeat 心跳** | 配置 heartbeat 周期 | 无（后台自动） | HEARTBEAT.md 配置检查项 | ⭐⭐⭐ |
+| **子 Agent 派生** | sessions_spawn（ping-pong） | 无（透明执行） | 启用 session tools | ⭐⭐ |
+| **ClawHub 技能** | 安装社区技能到 workspace/skills/ | 添加"技能市场"入口 | 无（agent 自行安装） | ⭐⭐ |
+
+**预期效果**：
+- 用户说"每天早上 9 点帮我查天气" → agent 自动创建 cron
+- Agent 定期自主检查记忆、整理笔记
+- 复杂任务自动拆解为子任务
+
+### Phase 2 — 浏览器自动化
+
+目标：agent 能代替用户操作网页。
+
+| 能力 | 实现方式 | 前端改动 | 后端改动 | 优先级 |
+|---|---|---|---|---|
+| **基础浏览器** | Chromium + Playwright in Docker | 显示截图/结果 | Docker 镜像安装 Chromium | ⭐⭐⭐ |
+| **网页截图** | browser screenshot → 返回图片 | 图片消息展示 | 无 | ⭐⭐ |
+| **表单填写** | browser act (fill/click/type) | 无 | 无 | ⭐⭐ |
+| **多标签页** | browser tabs management | 无 | Premium 配置 | ⭐ |
+
+**预期效果**：
+- "帮我在京东上搜一下 iPhone 16 的价格" → agent 打开浏览器自动操作
+- "截图保存这个网页" → agent 浏览并截图返回
+
+**Docker 镜像改造**：
+```dockerfile
+RUN apt-get install -y chromium
+RUN npx playwright install --with-deps chromium
+```
+
+### Phase 3 — 智能化升级
+
+目标：更强的模型、更丰富的数据源、更智能的工作流。
+
+| 能力 | 实现方式 | 说明 | 优先级 |
+|---|---|---|---|
+| **多模型切换** | LLM 管理模块 + 前端选择器 | 简单问题用免费模型，复杂问题用旗舰 | ⭐⭐⭐ |
+| **Perplexity 搜索** | 配置 PERPLEXITY_API_KEY | AI 合成答案，比 Brave 更智能 | ⭐⭐ |
+| **Firecrawl 反爬虫** | 配置 FIRECRAWL_API_KEY | 处理反爬虫网站 | ⭐ |
+| **远程嵌入** | Gemini/OpenAI embeddings | 更精准的语义搜索 | ⭐⭐ |
+| **Lobster 工作流** | 安装 Lobster CLI | 确定性流水线 + 审批门控 | ⭐ |
+
+### Phase 4 — 平台化
+
+目标：从单用户工具升级为可运营的平台。
+
+| 能力 | 说明 | 优先级 |
+|---|---|---|
+| **订阅分级实施** | Free/Pro/Premium 模板 + 配额控制 | ⭐⭐⭐ |
+| **Snapshot 版本系统** | 定期备份 + 崩溃恢复 + 蓝绿升级 | ⭐⭐⭐ |
+| **Android 客户端** | Kotlin/Compose，复用后端 API | ⭐⭐ |
+| **Web 客户端** | React/Vue，轻量版入口 | ⭐⭐ |
+| **多用户容器编排** | K8s / Docker Swarm | ⭐ |
+| **Canvas WebView** | iOS App 内嵌 WebView 替代 node Canvas | ⭐ |
+
+### Phase 5 — OpenClaw 替换（远期）
+
+目标：逐步用自建模块替换 OpenClaw，降低外部依赖。
+
+| 替换顺序 | 模块 | 自建难度 | 说明 |
+|---|---|---|---|
+| 1 | System Prompt 组装 | 低（100 行） | 自己注入 workspace 文件到 context |
+| 2 | 工具系统 | 低（500 行） | subprocess + 文件 I/O + API 调用 |
+| 3 | Agent Loop | 中（800 行） | LLM → tool_calls → 执行 → 循环 |
+| 4 | 会话管理 | 中（500 行） | transcript 存储 + 压缩 + 记忆冲刷 |
+| 5 | 浏览器自动化 | 高（Playwright 集成） | 直接用 Playwright Python |
+| 6 | 记忆语义搜索 | 中（embedding + SQLite） | 本地嵌入 + 向量检索 |
+
+**替换原则**：先稳定产品，再逐步替换。每替换一个模块，确保前端和用户无感。
+
+---
+
+## 19. 当前阶段实施优先级
+
+**已完成** ✅：
+1. ~~容器目录结构~~
+2. ~~多模态文件 inbox 机制~~
+3. ~~持久会话 + 记忆系统~~
+4. ~~推理过程/最终结果分离~~
+5. ~~TOOLS.md 自动维护~~
+
+**立即做**（Phase 1）：
+1. 启用 Cron + Heartbeat
+2. 配置 HEARTBEAT.md 自动检查项
+3. 启用 sessions_spawn（子任务）
+4. 前端"定时任务"管理 UI
+
+**1.0 后做**（Phase 2-3）：
+1. Docker 镜像安装 Chromium + Playwright
+2. 浏览器自动化启用
+3. 多模型切换 UI
+4. 远程嵌入 + Perplexity
+
+**长期规划**（Phase 4-5）：
+1. 订阅分级 + Snapshot 系统
+2. 多端客户端
+3. OpenClaw 模块逐步替换
 
 **不要一开始做**：
 - 分布式架构
@@ -421,7 +641,7 @@ Secrets：
 
 ---
 
-## 17. 架构核心总结
+## 20. 架构核心总结
 
 ClawBowl 的核心不是"跑 OpenClaw"。
 
@@ -430,3 +650,17 @@ ClawBowl 的核心不是"跑 OpenClaw"。
 控制面管理生命周期。
 执行面提供自由。
 版本库保证安全与可控。
+OpenClaw 是当前的能力底座，但不是不可替代的依赖。
+
+**核心资产（不可替代）**：
+- iOS App（用户交互层）
+- 后端 API Gateway（控制层）
+- 用户体系 + 数据库
+- Docker 编排逻辑
+- 产品设计思路（固定沙盒 + 持久记忆 + 成长型助手）
+
+**可替换模块（供应商）**：
+- OpenClaw（沙盒 + Agent Loop）→ 可自建
+- DeepSeek / ZenMux（LLM 提供商）→ 可切换
+- Brave Search（搜索 API）→ 可换 Perplexity/Google
+- 本地嵌入 / Gemini（记忆检索）→ 可换 OpenAI/Voyage
