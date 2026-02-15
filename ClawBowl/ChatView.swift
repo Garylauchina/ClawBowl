@@ -3,9 +3,13 @@ import SwiftUI
 /// 聊天主视图
 struct ChatView: View {
     @Environment(\.authService) private var authService
-    @State private var messages: [Message] = [
-        Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")
-    ]
+    @State private var messages: [Message] = {
+        // 启动时恢复上次的聊天记录；没有则显示默认问候
+        if let saved = MessageStore.load() {
+            return saved
+        }
+        return [Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")]
+    }()
     @State private var inputText = ""
     @State private var selectedAttachment: Attachment?
     @State private var isLoading = false
@@ -191,16 +195,15 @@ struct ChatView: View {
                     if let idx = messages.firstIndex(where: { $0.id == placeholderID }) {
                         messages[idx].isStreaming = false
                         if !messages[idx].content.isEmpty {
-                            // 有正式内容 → 清除思考文本
                             messages[idx].thinkingText = ""
                         }
-                        // 两者都为空才显示错误
                         if messages[idx].content.isEmpty && messages[idx].thinkingText.isEmpty {
                             messages[idx].content = "AI 未返回内容，请重试。"
                             messages[idx].status = .error
                         }
                     }
                     isLoading = false
+                    MessageStore.save(messages)  // 持久化
                 }
             } catch {
                 await MainActor.run {
@@ -220,6 +223,7 @@ struct ChatView: View {
                         }
                     }
                     isLoading = false
+                    MessageStore.save(messages)  // 持久化
                 }
             }
         }
@@ -232,6 +236,7 @@ struct ChatView: View {
             ]
             selectedAttachment = nil
         }
+        MessageStore.clear()  // 清除持久化数据
         Task {
             await ChatService.shared.resetSession()
         }

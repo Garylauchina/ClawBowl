@@ -42,12 +42,12 @@ struct Message: Identifiable, Equatable {
     /// 是否正在流式接收内容
     var isStreaming: Bool
 
-    enum Role: String {
+    enum Role: String, Codable {
         case user
         case assistant
     }
 
-    enum Status {
+    enum Status: String, Codable {
         case sending
         case sent
         case error
@@ -75,6 +75,73 @@ struct Message: Identifiable, Equatable {
     var hasAttachment: Bool { attachment != nil }
     /// 是否包含图片附件
     var hasImage: Bool { attachment?.isImage ?? false }
+}
+
+// MARK: - Message Persistence
+
+/// 轻量持久化模型（不含附件二进制数据，只保留文本信息）
+private struct PersistedMessage: Codable {
+    let role: String
+    let content: String
+    let timestamp: Date
+    let attachmentLabel: String?  // "[图片]" 或 "[文件: xxx]" 或 nil
+}
+
+/// 消息持久化工具 — 将聊天记录保存到本地 JSON 文件
+enum MessageStore {
+    private static var fileURL: URL {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("chat_messages.json")
+    }
+
+    /// 保存消息列表（最多保留最近 50 条）
+    static func save(_ messages: [Message]) {
+        let recent = messages.suffix(50)
+        let persisted = recent.map { msg -> PersistedMessage in
+            var label: String? = nil
+            if let att = msg.attachment {
+                label = att.isImage ? "[图片]" : "[文件: \(att.filename)]"
+            }
+            return PersistedMessage(
+                role: msg.role.rawValue,
+                content: msg.content,
+                timestamp: msg.timestamp,
+                attachmentLabel: label
+            )
+        }
+
+        if let data = try? JSONEncoder().encode(persisted) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+
+    /// 加载已持久化的消息
+    static func load() -> [Message]? {
+        guard let data = try? Data(contentsOf: fileURL),
+              let persisted = try? JSONDecoder().decode([PersistedMessage].self, from: data),
+              !persisted.isEmpty else {
+            return nil
+        }
+
+        return persisted.compactMap { p in
+            guard let role = Message.Role(rawValue: p.role) else { return nil }
+            // 附件只保留标签文本，不恢复二进制数据
+            let displayContent: String
+            if let label = p.attachmentLabel, p.content.isEmpty {
+                displayContent = label
+            } else if p.attachmentLabel != nil {
+                displayContent = p.content
+            } else {
+                displayContent = p.content
+            }
+            return Message(role: role, content: displayContent)
+        }
+    }
+
+    /// 清空持久化数据
+    static func clear() {
+        try? FileManager.default.removeItem(at: fileURL)
+    }
 }
 
 // MARK: - API Response Models

@@ -398,21 +398,25 @@ struct DocumentPicker: UIViewControllerRepresentable {
 // MARK: - Speech Recognition Manager
 
 /// 语音识别管理器：使用 iOS Speech 框架进行本地实时转写
-/// 所有重量级对象（SFSpeechRecognizer、AVAudioEngine）延迟到首次使用时创建，避免阻塞启动。
+/// 支持"按住说话、松开停止"模式：
+///   - startRecording() 异步请求权限后开始录音
+///   - stopRecording() 立即停止；如果录音尚未开始（权限回调中），标记 pendingStop
+///   - beginRecording() 检查 pendingStop，若已松手则不启动
 class SpeechRecognitionManager: ObservableObject {
     @Published var isRecording = false
     @Published var transcribedText = ""
     @Published var showPermissionAlert = false
     @Published var permissionMessage = ""
 
-    // 延迟初始化：只在用户点击麦克风时才创建
     private var speechRecognizer: SFSpeechRecognizer?
     private var audioEngine: AVAudioEngine?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var isInitialized = false
 
-    /// 延迟初始化语音引擎（在后台线程执行，避免阻塞 UI）
+    /// 关键：用户已松手但权限回调还没返回时，标记为 true
+    private var pendingStop = false
+
     private func ensureInitialized() {
         guard !isInitialized else { return }
         speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
@@ -421,15 +425,20 @@ class SpeechRecognitionManager: ObservableObject {
     }
 
     func startRecording() {
-        // 检查语音识别权限
+        pendingStop = false  // 清除上次残留的停止标记
+
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             DispatchQueue.main.async {
+                guard let self = self else { return }
+                // 权限回调返回时，检查用户是否已经松手
+                if self.pendingStop { return }
+
                 switch status {
                 case .authorized:
-                    self?.checkMicrophoneAndStart()
+                    self.checkMicrophoneAndStart()
                 case .denied, .restricted:
-                    self?.permissionMessage = "请在系统设置中允许 ClawBowl 使用语音识别功能。"
-                    self?.showPermissionAlert = true
+                    self.permissionMessage = "请在系统设置中允许 ClawBowl 使用语音识别功能。"
+                    self.showPermissionAlert = true
                 case .notDetermined:
                     break
                 @unknown default:
@@ -442,21 +451,28 @@ class SpeechRecognitionManager: ObservableObject {
     private func checkMicrophoneAndStart() {
         AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
             DispatchQueue.main.async {
+                guard let self = self else { return }
+                if self.pendingStop { return }
+
                 if granted {
-                    self?.beginRecording()
+                    self.beginRecording()
                 } else {
-                    self?.permissionMessage = "请在系统设置中允许 ClawBowl 使用麦克风。"
-                    self?.showPermissionAlert = true
+                    self.permissionMessage = "请在系统设置中允许 ClawBowl 使用麦克风。"
+                    self.showPermissionAlert = true
                 }
             }
         }
     }
 
     private func beginRecording() {
-        // 延迟初始化重量级对象
+        // 再次检查：用户可能在极短间隔内松手
+        if pendingStop {
+            pendingStop = false
+            return
+        }
+
         ensureInitialized()
 
-        // 如果有正在进行的任务，先停止
         if recognitionTask != nil {
             recognitionTask?.cancel()
             recognitionTask = nil
@@ -470,7 +486,6 @@ class SpeechRecognitionManager: ObservableObject {
 
         guard let audioEngine = audioEngine else { return }
 
-        // 配置音频会话
         let audioSession = AVAudioSession.sharedInstance()
         do {
             try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
@@ -482,10 +497,8 @@ class SpeechRecognitionManager: ObservableObject {
         recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
         guard let recognitionRequest = recognitionRequest else { return }
 
-        // 启用实时转写（边说边出文字）
         recognitionRequest.shouldReportPartialResults = true
 
-        // 如果设备支持，使用离线识别
         if speechRecognizer.supportsOnDeviceRecognition {
             recognitionRequest.requiresOnDeviceRecognition = true
         }
@@ -507,7 +520,6 @@ class SpeechRecognitionManager: ObservableObject {
             }
         }
 
-        // 配置音频输入
         let inputNode = audioEngine.inputNode
         let recordingFormat = inputNode.outputFormat(forBus: 0)
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
@@ -527,11 +539,18 @@ class SpeechRecognitionManager: ObservableObject {
     }
 
     func stopRecording() {
-        recognitionRequest?.endAudio()
-        stopAudioEngine()
-        DispatchQueue.main.async {
-            self.isRecording = false
+        pendingStop = true  // 无论录音是否已开始，都标记
+
+        if isRecording {
+            // 录音已在进行，正常停止
+            recognitionRequest?.endAudio()
+            stopAudioEngine()
+            DispatchQueue.main.async {
+                self.isRecording = false
+            }
         }
+        // 如果 isRecording == false，说明权限回调还没返回，
+        // pendingStop 会在回调中阻止录音启动
     }
 
     private func stopAudioEngine() {
