@@ -3,7 +3,6 @@ import PhotosUI
 import UniformTypeIdentifiers
 import UIKit
 import Speech
-import AVFoundation
 
 /// 底部聊天输入栏（支持图片、文件附件、语音输入）
 struct ChatInputBar: View {
@@ -130,7 +129,7 @@ struct ChatInputBar: View {
         } message: {
             Text(speechManager.permissionMessage)
         }
-        .onChange(of: speechManager.transcribedText) { _, newValue in
+        .onChange(of: speechManager.transcribedText) { newValue in
             if !newValue.isEmpty {
                 text = newValue
             }
@@ -440,7 +439,7 @@ class SpeechRecognitionManager: ObservableObject {
     }
 
     private func checkMicrophoneAndStart() {
-        AVAudioApplication.requestRecordPermission { [weak self] granted in
+        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
             DispatchQueue.main.async {
                 if granted {
                     self?.beginRecording()
