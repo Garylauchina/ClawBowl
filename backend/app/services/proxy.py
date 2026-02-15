@@ -218,16 +218,26 @@ def _build_request_parts(
     model: str | None,
     stream: bool,
 ) -> tuple[str, dict[str, str], dict]:
-    """Return (url, headers, body) for forwarding to OpenClaw gateway."""
+    """Return (url, headers, body) for forwarding to OpenClaw gateway.
+
+    关键设计：
+    - 使用 instance.user_id 作为 OpenAI `user` 字段 → OpenClaw 网关据此
+      派生稳定 session key，实现跨请求的持久会话（对话历史、记忆管理等）。
+    - 同时设置 x-openclaw-session-key 以获得更精确的会话路由控制。
+    """
     url = f"http://127.0.0.1:{instance.port}/v1/chat/completions"
+    # Stable session key = "clawbowl-{user_id}" → Gateway 根据此值复用 session
+    session_key = f"clawbowl-{instance.user_id}"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {instance.gateway_token}",
+        "x-openclaw-session-key": session_key,
     }
     body: dict = {
         "model": model or _DEFAULT_MODEL,
         "messages": messages,
         "stream": stream,
+        "user": instance.user_id,  # OpenClaw 据此派生持久 session
     }
     return url, headers, body
 
