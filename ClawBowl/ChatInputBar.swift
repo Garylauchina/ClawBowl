@@ -13,6 +13,8 @@ struct ChatInputBar: View {
     @FocusState private var isFocused: Bool
     @State private var showImagePicker = false
     @State private var showDocumentPicker = false
+    @State private var showFileTooLargeAlert = false
+    @State private var rejectedFileName = ""
 
     /// 文件大小限制 10MB
     private let maxFileSize = 10 * 1024 * 1024
@@ -79,7 +81,19 @@ struct ChatInputBar: View {
             ImagePicker(attachment: $selectedAttachment)
         }
         .sheet(isPresented: $showDocumentPicker) {
-            DocumentPicker(attachment: $selectedAttachment, maxFileSize: maxFileSize)
+            DocumentPicker(
+                attachment: $selectedAttachment,
+                maxFileSize: maxFileSize,
+                onFileTooLarge: { filename in
+                    rejectedFileName = filename
+                    showFileTooLargeAlert = true
+                }
+            )
+        }
+        .alert("文件过大", isPresented: $showFileTooLargeAlert) {
+            Button("知道了", role: .cancel) {}
+        } message: {
+            Text("\"\(rejectedFileName)\" 超过 10MB 限制，请选择较小的文件。")
         }
     }
 
@@ -233,6 +247,7 @@ struct ImagePicker: UIViewControllerRepresentable {
 struct DocumentPicker: UIViewControllerRepresentable {
     @Binding var attachment: Attachment?
     let maxFileSize: Int
+    var onFileTooLarge: ((String) -> Void)?
     @Environment(\.dismiss) private var dismiss
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
@@ -267,7 +282,10 @@ struct DocumentPicker: UIViewControllerRepresentable {
 
                 // 检查文件大小
                 guard data.count <= parent.maxFileSize else {
-                    // 超出大小限制，不选择
+                    let filename = url.lastPathComponent
+                    DispatchQueue.main.async {
+                        self.parent.onFileTooLarge?(filename)
+                    }
                     return
                 }
 

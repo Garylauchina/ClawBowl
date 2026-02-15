@@ -157,9 +157,14 @@ struct ChatView: View {
                         case .thinking(let status):
                             messages[idx].thinkingText = status
                         case .content(let text):
+                            // 收到正式内容后清除推理过程
+                            if !messages[idx].thinkingText.isEmpty {
+                                messages[idx].thinkingText = ""
+                            }
                             messages[idx].content += text
                         case .done:
                             messages[idx].isStreaming = false
+                            messages[idx].thinkingText = ""
                         }
                     }
                 }
@@ -168,7 +173,8 @@ struct ChatView: View {
                 await MainActor.run {
                     if let idx = messages.firstIndex(where: { $0.id == placeholderID }) {
                         messages[idx].isStreaming = false
-                        if messages[idx].content.isEmpty && messages[idx].thinkingText.isEmpty {
+                        messages[idx].thinkingText = ""
+                        if messages[idx].content.isEmpty {
                             messages[idx].content = "AI 未返回内容，请重试。"
                             messages[idx].status = .error
                         }
