@@ -3,67 +3,156 @@ import SwiftUI
 @main
 struct ClawBowlApp: App {
     @StateObject private var authService = AuthService.shared
-    @State private var splashDone = false
+    @StateObject private var startup = StartupController()
 
     var body: some Scene {
         WindowGroup {
-            if !splashDone {
-                // ── Splash 阶段：深色全屏 ──
-                SplashView {
-                    withAnimation(.easeInOut(duration: 0.35)) {
-                        splashDone = true
-                    }
+            Group {
+                if !startup.isReady {
+                    // ── 第一步：先显示欢迎屏 ──
+                    SplashView(progress: startup.progressText)
+                        .onAppear {
+                            // 欢迎屏显示后，再通知后端开始工作
+                            startup.beginStartup()
+                        }
+                } else if authService.isAuthenticated {
+                    // ── 正常聊天界面（原始布局，无任何外层包裹）──
+                    ChatView()
+                        .environment(\.authService, authService)
+                } else {
+                    AuthView(authService: authService)
                 }
-            } else if authService.isAuthenticated {
-                // ── 正常聊天界面：不包裹任何额外容器，还原原始布局 ──
-                ChatView()
-                    .environment(\.authService, authService)
-            } else {
-                AuthView(authService: authService)
             }
+            .animation(.easeInOut, value: authService.isAuthenticated)
         }
     }
 }
 
-// MARK: - Splash View
+// MARK: - Startup Controller
 
-/// 启动欢迎屏：Logo + 随机趣味提示语，同时后台预热容器（fire-and-forget）
+/// 启动控制器：管理后端初始化流程，将进度反馈给前端
+@MainActor
+class StartupController: ObservableObject {
+    @Published var isReady = false
+    @Published var progressText = "正在加载..."
+
+    private var hasStarted = false
+
+    /// 由 SplashView.onAppear 调用 — 欢迎屏已经显示后才开始后端工作
+    func beginStartup() {
+        guard !hasStarted else { return }
+        hasStarted = true
+
+        Task {
+            // ① 检查登录状态
+            progressText = "正在检查登录状态..."
+            await smallDelay(0.3)
+
+            let hasToken = AuthService.shared.accessToken != nil
+
+            if hasToken {
+                // ② 刷新 Token
+                progressText = "正在验证身份..."
+                await refreshTokenQuiet()
+
+                // ③ 预热容器
+                progressText = "正在启动 AI 引擎..."
+                await warmupContainerQuiet()
+
+                // ④ 初始化服务
+                progressText = "正在准备聊天服务..."
+                _ = ChatService.shared
+                await smallDelay(0.3)
+            } else {
+                // 未登录，跳过后端预热
+                progressText = "准备登录界面..."
+                await smallDelay(0.5)
+            }
+
+            // ⑤ 完成
+            progressText = "准备就绪！"
+            await smallDelay(0.4)
+
+            withAnimation(.easeInOut(duration: 0.3)) {
+                isReady = true
+            }
+        }
+    }
+
+    // MARK: - Private
+
+    /// 刷新 Token（2 秒超时，失败静默跳过）
+    private func refreshTokenQuiet() async {
+        await withTimeLimit(seconds: 2) {
+            try? await AuthService.shared.refreshToken()
+        }
+    }
+
+    /// 预热后端容器（5 秒超时，失败静默跳过）
+    private func warmupContainerQuiet() async {
+        guard let token = AuthService.shared.accessToken,
+              let url = URL(string: "https://prometheusclothing.net/api/v2/chat/warmup") else {
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 5
+
+        await withTimeLimit(seconds: 5) {
+            _ = try? await URLSession.shared.data(for: request)
+        }
+    }
+
+    /// 执行一个异步操作，但最多等待指定秒数
+    private func withTimeLimit(seconds: Double, operation: @escaping () async -> Void) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await operation() }
+            group.addTask { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
+            // 第一个完成的就返回（操作完成或超时）
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
+    private func smallDelay(_ seconds: Double) async {
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+    }
+}
+
+// MARK: - Splash View（纯显示，不包含任何业务逻辑）
+
 struct SplashView: View {
-    let onFinish: () -> Void
+    let progress: String
 
     @State private var logoScale: CGFloat = 0.85
     @State private var pulseScale: CGFloat = 1.0
-    @State private var dotCount = 0
-    @State private var timerRef: Timer?
 
     private static let tips = [
         "正在唤醒你的 AI 助手",
         "连接数字灵魂中",
-        "准备好了吗？",
+        "准备好了吗？让我们开始吧",
         "AI 正在热身",
-        "正在为你打开专属工作站",
         "数字世界的大门正在开启",
-        "正在加载你的私人助理",
-        "一切就绪，马上开始",
-        "你的 AI 已经等不及了",
+        "你的 AI 助手已经等不及了",
         "灵魂上线中",
         "正在同步记忆",
-        "初始化创造力引擎",
     ]
 
-    private let tip = tips.randomElement() ?? "加载中"
+    private let tip = tips.randomElement() ?? ""
 
     var body: some View {
         ZStack {
-            // Splash 专属深色背景
             Color(red: 0.05, green: 0.05, blue: 0.15)
                 .ignoresSafeArea()
 
-            VStack(spacing: 24) {
+            VStack(spacing: 20) {
                 Spacer()
 
+                // Logo
                 Image(systemName: "bubble.left.and.bubble.right.fill")
-                    .font(.system(size: 72))
+                    .font(.system(size: 64))
                     .foregroundStyle(
                         LinearGradient(
                             colors: [.blue, .cyan, .teal],
@@ -73,107 +162,45 @@ struct SplashView: View {
                     )
                     .scaleEffect(logoScale * pulseScale)
 
+                // 标题
                 Text("ClawBowl")
-                    .font(.system(size: 36, weight: .bold, design: .rounded))
+                    .font(.system(size: 32, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
 
+                // 随机趣味语
+                if !tip.isEmpty {
+                    Text(tip)
+                        .font(.footnote)
+                        .foregroundColor(.white.opacity(0.4))
+                        .padding(.top, 4)
+                }
+
                 Spacer()
 
-                Text(tip + String(repeating: ".", count: dotCount))
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.6))
-                    .frame(height: 20)
+                // ── 后端进度反馈 ──
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white.opacity(0.5)))
+                        .scaleEffect(0.8)
+
+                    Text(progress)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.6))
+                }
+                .frame(height: 24)
 
                 Spacer()
-                    .frame(height: 60)
+                    .frame(height: 50)
             }
         }
         .onAppear {
-            startAnimations()
-            startBackgroundWarmup()
-            scheduleSplashDismiss()
-        }
-        .onDisappear {
-            timerRef?.invalidate()
-            timerRef = nil
-        }
-    }
-
-    // MARK: - Animations
-
-    private func startAnimations() {
-        withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
-            logoScale = 1.0
-        }
-        withAnimation(
-            .easeInOut(duration: 1.2)
-            .repeatForever(autoreverses: true)
-        ) {
-            pulseScale = 1.06
-        }
-        timerRef = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
-            dotCount = (dotCount + 1) % 4
-        }
-    }
-
-    // MARK: - 后台预热（fire-and-forget，不阻塞 Splash 退出）
-
-    /// 在后台启动初始化任务。这些任务不阻塞 Splash 消失。
-    /// 即使 Splash 先退出，预热也会继续在后台完成。
-    private func startBackgroundWarmup() {
-        Task(priority: .userInitiated) {
-            // ① Token 刷新（2 秒超时，不等到 15 秒）
-            await refreshTokenQuick()
-
-            // ② 预热容器（3 秒超时）
-            await warmupContainerQuick()
-
-            // ③ ChatService 单例
-            _ = ChatService.shared
-        }
-    }
-
-    /// Splash 固定显示 2.5 秒后退出，不等待任何网络请求
-    private func scheduleSplashDismiss() {
-        Task {
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            await MainActor.run {
-                onFinish()
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
+                logoScale = 1.0
+            }
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                pulseScale = 1.05
             }
         }
-    }
-
-    /// 快速刷新 token（短超时，失败就跳过）
-    private func refreshTokenQuick() async {
-        guard AuthService.shared.accessToken != nil else { return }
-
-        // 用 TaskGroup + sleep 实现 2 秒超时
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask {
-                try? await AuthService.shared.refreshToken()
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-            }
-            // 第一个完成就返回（refresh 完成 或 2秒超时）
-            await group.next()
-            group.cancelAll()
-        }
-    }
-
-    /// 快速预热容器（短超时，失败就跳过）
-    private func warmupContainerQuick() async {
-        guard let token = AuthService.shared.accessToken,
-              let url = URL(string: "https://prometheusclothing.net/api/v2/chat/warmup") else {
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 3  // 3 秒超时（不是 15 秒）
-
-        _ = try? await URLSession.shared.data(for: request)
     }
 }
 
