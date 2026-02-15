@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 @main
 struct ClawBowlApp: App {
@@ -8,37 +7,27 @@ struct ClawBowlApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ZStack {
-                // 始终铺底深色，消除白→深色的闪烁
-                Color(red: 0.05, green: 0.05, blue: 0.15)
-                    .ignoresSafeArea()
-
-                if !splashDone {
-                    SplashView {
-                        withAnimation(.easeInOut(duration: 0.35)) {
-                            splashDone = true
-                        }
+            if !splashDone {
+                // ── Splash 阶段：深色全屏 ──
+                SplashView {
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        splashDone = true
                     }
-                    .transition(.opacity)
-                } else if authService.isAuthenticated {
-                    ChatView()
-                        .environment(\.authService, authService)
-                        .transition(.opacity)
-                } else {
-                    AuthView(authService: authService)
-                        .transition(.opacity)
                 }
+            } else if authService.isAuthenticated {
+                // ── 正常聊天界面：不包裹任何额外容器，还原原始布局 ──
+                ChatView()
+                    .environment(\.authService, authService)
+            } else {
+                AuthView(authService: authService)
             }
-            .animation(.easeInOut(duration: 0.35), value: splashDone)
-            .animation(.easeInOut, value: authService.isAuthenticated)
         }
     }
 }
 
 // MARK: - Splash View
 
-/// 启动欢迎屏：Logo + 随机趣味提示语
-/// 核心职责：在展示期间完成 **所有** 后台初始化，确保进入聊天界面后零卡顿。
+/// 启动欢迎屏：Logo + 随机趣味提示语，同时后台预热容器（fire-and-forget）
 struct SplashView: View {
     let onFinish: () -> Void
 
@@ -46,7 +35,6 @@ struct SplashView: View {
     @State private var pulseScale: CGFloat = 1.0
     @State private var dotCount = 0
     @State private var timerRef: Timer?
-    @State private var statusText = ""
 
     private static let tips = [
         "正在唤醒你的 AI 助手",
@@ -66,38 +54,44 @@ struct SplashView: View {
     private let tip = tips.randomElement() ?? "加载中"
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
+        ZStack {
+            // Splash 专属深色背景
+            Color(red: 0.05, green: 0.05, blue: 0.15)
+                .ignoresSafeArea()
 
-            Image(systemName: "bubble.left.and.bubble.right.fill")
-                .font(.system(size: 72))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [.blue, .cyan, .teal],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+            VStack(spacing: 24) {
+                Spacer()
+
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .font(.system(size: 72))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.blue, .cyan, .teal],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
-                )
-                .scaleEffect(logoScale * pulseScale)
+                    .scaleEffect(logoScale * pulseScale)
 
-            Text("ClawBowl")
-                .font(.system(size: 36, weight: .bold, design: .rounded))
-                .foregroundColor(.white)
+                Text("ClawBowl")
+                    .font(.system(size: 36, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
 
-            Spacer()
+                Spacer()
 
-            // 趣味提示 + 加载点
-            Text(tip + String(repeating: ".", count: dotCount))
-                .font(.subheadline)
-                .foregroundColor(.white.opacity(0.6))
-                .frame(height: 20)
+                Text(tip + String(repeating: ".", count: dotCount))
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.6))
+                    .frame(height: 20)
 
-            Spacer()
-                .frame(height: 60)
+                Spacer()
+                    .frame(height: 60)
+            }
         }
         .onAppear {
             startAnimations()
-            performAllStartupWork()
+            startBackgroundWarmup()
+            scheduleSplashDismiss()
         }
         .onDisappear {
             timerRef?.invalidate()
@@ -122,50 +116,53 @@ struct SplashView: View {
         }
     }
 
-    // MARK: - 启动期间完成所有初始化
+    // MARK: - 后台预热（fire-and-forget，不阻塞 Splash 退出）
 
-    /// 在 Splash 显示期间，按顺序完成所有后台准备工作。
-    /// 所有任务完成 + 最低显示时间后，才调用 onFinish 进入主界面。
-    private func performAllStartupWork() {
-        let minimumDisplayNanos: UInt64 = 2_500_000_000  // 2.5 秒
+    /// 在后台启动初始化任务。这些任务不阻塞 Splash 消失。
+    /// 即使 Splash 先退出，预热也会继续在后台完成。
+    private func startBackgroundWarmup() {
+        Task(priority: .userInitiated) {
+            // ① Token 刷新（2 秒超时，不等到 15 秒）
+            await refreshTokenQuick()
 
-        Task {
-            // ① 最低显示时间（与后续任务并行计时）
-            async let minDelay: () = Task.sleep(nanoseconds: minimumDisplayNanos)
+            // ② 预热容器（3 秒超时）
+            await warmupContainerQuick()
 
-            // ② Token 刷新（如果已登录）→ 确保后续 API 调用不会 401
-            async let tokenWork: () = refreshTokenIfNeeded()
-
-            // ③ 预热键盘（iOS 首次键盘弹出有 ~300ms 延迟）
-            async let keyboardWork: () = preWarmKeyboard()
-
-            // 等待 token 刷新完成
-            _ = try? await tokenWork
-
-            // ④ Token 刷新后，再预热容器（需要有效 token）
-            await warmupContainer()
-
-            // ⑤ 预触发 ChatService 单例初始化
+            // ③ ChatService 单例
             _ = ChatService.shared
+        }
+    }
 
-            // 等待最低显示时间和键盘预热
-            _ = try? await minDelay
-            _ = try? await keyboardWork
-
+    /// Splash 固定显示 2.5 秒后退出，不等待任何网络请求
+    private func scheduleSplashDismiss() {
+        Task {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
             await MainActor.run {
                 onFinish()
             }
         }
     }
 
-    /// 刷新 JWT token（如果已登录且 token 可能过期）
-    private func refreshTokenIfNeeded() async {
+    /// 快速刷新 token（短超时，失败就跳过）
+    private func refreshTokenQuick() async {
         guard AuthService.shared.accessToken != nil else { return }
-        try? await AuthService.shared.refreshToken()
+
+        // 用 TaskGroup + sleep 实现 2 秒超时
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try? await AuthService.shared.refreshToken()
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            // 第一个完成就返回（refresh 完成 或 2秒超时）
+            await group.next()
+            group.cancelAll()
+        }
     }
 
-    /// 预热后端容器（调用 warmup 端点触发 Docker 容器启动）
-    private func warmupContainer() async {
+    /// 快速预热容器（短超时，失败就跳过）
+    private func warmupContainerQuick() async {
         guard let token = AuthService.shared.accessToken,
               let url = URL(string: "https://prometheusclothing.net/api/v2/chat/warmup") else {
             return
@@ -174,27 +171,9 @@ struct SplashView: View {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 15
+        request.timeoutInterval = 3  // 3 秒超时（不是 15 秒）
 
         _ = try? await URLSession.shared.data(for: request)
-    }
-
-    /// 预热 iOS 键盘子系统
-    /// iOS 第一次弹出键盘时需要加载键盘进程（~200-400ms），
-    /// 在 splash 期间提前触发可以消除进入聊天后的首次输入卡顿。
-    private func preWarmKeyboard() async {
-        await MainActor.run {
-            let window = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .first?.windows.first
-
-            let tempField = UITextField(frame: .zero)
-            tempField.autocorrectionType = .no
-            window?.addSubview(tempField)
-            tempField.becomeFirstResponder()
-            tempField.resignFirstResponder()
-            tempField.removeFromSuperview()
-        }
     }
 }
 
