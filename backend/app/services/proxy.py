@@ -351,18 +351,41 @@ async def proxy_chat_stream(
                             yield line + "\n\n"
                             continue
 
-                        delta = choices[0].get("delta", {})
-                        finish_reason = choices[0].get("finish_reason")
+                        choice = choices[0]
+                        delta = choice.get("delta", {})
+                        finish_reason = choice.get("finish_reason")
                         chunk_count += 1
 
-                        # Sampled logging
-                        if chunk_count <= 3 or chunk_count % 100 == 0 or finish_reason:
+                        # ── 详细日志：捕获完整 chunk 结构 ──
+                        # 前 10 个 + 轮次边界 + 最后的
+                        now_ts = time.monotonic()
+                        gap_from_last = (
+                            now_ts - last_content_ts
+                            if last_content_ts > 0
+                            else 0.0
+                        )
+                        is_boundary = gap_from_last > _TURN_GAP_SECONDS
+                        if (
+                            chunk_count <= 10
+                            or is_boundary
+                            or finish_reason
+                            or chunk_count % 200 == 0
+                        ):
+                            # Log the FULL choice object (truncate content to 80 chars)
+                            log_choice = dict(choice)
+                            log_delta = dict(delta)
+                            if log_delta.get("content"):
+                                c = log_delta["content"]
+                                log_delta["content"] = (
+                                    c[:80] + "..." if len(c) > 80 else c
+                                )
+                            log_choice["delta"] = log_delta
                             logger.info(
-                                "SSE #%d: keys=%s finish=%s turn=%d",
+                                "SSE #%d (gap=%.1fs turn=%d): %s",
                                 chunk_count,
-                                [k for k in delta if delta[k]],
-                                finish_reason,
+                                gap_from_last,
                                 turn_count,
+                                json.dumps(log_choice, ensure_ascii=False),
                             )
 
                         # ── Tool calls → emit thinking status ──
