@@ -138,29 +138,116 @@ cache/                           # 临时缓存
 
 ---
 
-## 6. Snapshot 版本系统
+## 6. 数字灵魂备份系统
 
-### 6.1 Snapshot 定义
+### 6.1 三层备份架构
 
-每个 Snapshot 是：
-- 灵魂目录的压缩包（zstd）
-- 带递增版本号
-- 带 SHA-256 校验
-- 带来源说明
+```
+┌─ 第一层：实时镜像（bind mount）─────────────────────────────┐
+│  宿主机直接持有所有文件，容器崩溃不丢数据                    │
+│  /var/lib/clawbowl/runtimes/{rid}/soul/                      │
+│  ✅ Phase 0 已实现（当前架构天然具备）                        │
+└──────────────────────────────────────────────────────────────┘
+         ↓ 定期快照
+┌─ 第二层：本地 Snapshot（tar.zst + JSON 摘要）───────────────┐
+│  files.tar.zst    ← 原始文件完整备份（用于恢复）             │
+│  soul_summary.json ← 核心字段结构化提取（用于查询/迁移）     │
+│  manifest.json    ← 版本号、时间戳、SHA-256                  │
+│  ⭐ Phase 1 实现基础版，Phase 3 加入 JSON 结构化              │
+└──────────────────────────────────────────────────────────────┘
+         ↓ 远期加密上传
+┌─ 第三层：异地备份（OSS/S3）─────────────────────────────────┐
+│  加密后上传云存储，防宿主机单点故障                           │
+│  📋 Phase 4 实现                                             │
+└──────────────────────────────────────────────────────────────┘
+```
 
-### 6.2 manifest 示例
+### 6.2 Snapshot 定义
+
+每个 Snapshot 包含：
+
+```
+/var/lib/clawbowl/runtimes/{rid}/snapshots/{snap_id}/
+  files.tar.zst          # 灵魂目录完整压缩包
+  manifest.json          # 版本清单（见下）
+  soul_summary.json      # 结构化摘要（Phase 3 加入）
+```
+
+**manifest.json：**
 
 ```json
 {
   "rid": "uuid",
   "snap_id": "000012",
   "created_at": "2026-02-14T12:00:00Z",
-  "source": "template|periodic|upgrade|crash|manual",
+  "source": "periodic|upgrade|crash|manual|pre_cron",
   "tier": "free",
   "openclaw_version": "2026.2.12",
-  "hash": "sha256:..."
+  "files_hash": "sha256:...",
+  "files_size_bytes": 5242880,
+  "prev_snap_id": "000011"
 }
 ```
+
+**soul_summary.json（Phase 3 加入）：**
+
+```json
+{
+  "version": "1.0",
+  "rid": "f8a44871-...",
+  "extracted_at": "2026-02-15T20:00:00Z",
+  "soul": {
+    "identity": "（IDENTITY.md 全文）",
+    "personality": "（SOUL.md 全文）",
+    "user_profile": "（USER.md 全文）",
+    "memory_summary": "（MEMORY.md 全文）",
+    "agent_rules": "（AGENTS.md 全文）",
+    "tools": "（TOOLS.md 全文）"
+  },
+  "daily_memories": [
+    { "date": "2026-02-14", "content": "..." },
+    { "date": "2026-02-15", "content": "..." }
+  ],
+  "config": { "/* openclaw.json 内容 */" : "" },
+  "stats": {
+    "total_messages": 1234,
+    "memory_files_count": 15,
+    "workspace_size_bytes": 52428800
+  }
+}
+```
+
+**为什么同时保留 tar.zst 和 JSON？**
+
+| 需求 | tar.zst | soul_summary.json |
+|---|---|---|
+| 灾难恢复 | ✅ 原样解压即可 | ❌ 需要 JSON→MD 反序列化 |
+| 结构化查询 | ❌ 需要解压+读文件 | ✅ 直接解析 JSON |
+| 跨版本迁移 | ❌ 依赖 OpenClaw 目录结构 | ✅ 通用格式，可注入任何系统 |
+| 部分恢复 | ❌ 全量恢复 | ✅ 可只恢复记忆/人格 |
+| 备份速度 | ✅ 极快（一个 tar 命令） | ⚠️ 需要解析 MD 文件 |
+
+### 6.3 定期备份策略
+
+| 级别 | 频率 | 保留数量 | 说明 |
+|------|------|---------|------|
+| Free | 每 24 小时 | 3 个 | 基本保护 |
+| Pro | 每 5 分钟 | 30 个 | 约 2.5 小时回滚窗口 |
+| Premium | 每 1 分钟 | 无限 | 精细粒度回滚 |
+
+**备份流程**（无需进入容器，直接操作宿主机挂载目录）：
+
+1. 从 `/var/lib/clawbowl/runtimes/{rid}/soul/` 打包 → `files.tar.zst`
+2. 计算 SHA-256 → 写入 `manifest.json`
+3. （Phase 3+）解析 MD 文件 → 生成 `soul_summary.json`
+4. 更新 `runtime.json` 中的最新快照指针
+5. 清理超出保留数量的旧快照
+
+**特殊触发时机**：
+- 容器升级前（`source: "upgrade"`）
+- 启用 cron/heartbeat 前（`source: "pre_cron"`）
+- 用户手动触发（`source: "manual"`）
+- 容器崩溃检测到后立即备份当前状态（`source: "crash"`）
 
 ---
 
@@ -171,46 +258,63 @@ cache/                           # 临时缓存
 1. 选择模板（free/pro）
 2. 生成 runtime_id
 3. 创建 Snapshot#000001（从模板）
-4. 启动容器
+4. 启动容器（带资源限制）
 5. 注入 Snapshot
 6. 运行健康检查
 
-### 7.2 定期备份
+### 7.2 容器资源管理与热扩容
 
-| 级别 | 频率 | 保留数量 |
-|------|------|---------|
-| Free | 每 24 小时 | 3 个 |
-| Pro | 每 5 分钟 | 30 个 |
-| Premium | 每 1 分钟 | 无限 |
+**初始资源分配（按订阅级别）：**
 
-流程：
-1. 从宿主机挂载目录直接打包 soul（无需进入容器）
-2. 生成 Snapshot
-3. 更新 runtime.json
+| 资源 | Free | Pro | Premium |
+|---|---|---|---|
+| CPU | 0.5 核 | 0.75 核 | 1.0 核 |
+| 内存 | 512 MB | 1.5 GB | 2 GB |
+| 存储 | 100 MB（workspace） | 500 MB | 2 GB |
+
+**热扩容能力（无需重建容器）：**
+
+| 资源 | 热扩容 | 实现方式 | 注意事项 |
+|---|---|---|---|
+| CPU | ✅ 即时生效 | `docker update --cpus=N` | 无风险 |
+| 内存 | ✅ 向上安全 | `docker update --memory=Xg` | 只能增加，减少可能触发 OOM |
+| 存储 | ✅ 天然支持 | bind mount → 宿主机文件系统 | 容器不感知限制，需在控制面做配额检查 |
+
+**存储配额实现**：
+- 容器使用 bind mount，存储空间实际在宿主机上
+- 控制面定期检查 `du -s /var/lib/clawbowl/runtimes/{rid}/`
+- 超配额 → 通知用户 + Agent 限制写入（而非直接杀容器）
+- 升级订阅后，控制面立即更新配额，无需重启
+
+**热扩容触发场景**（Phase 4 平台化后启用）：
+- 用户升级订阅 → 自动 `docker update` 提升 CPU/内存
+- 容器内存接近限制 → 控制面预警 + 自动临时扩容
+- 复杂任务执行中（如浏览器自动化）→ 临时提升资源，完成后回收
 
 ### 7.3 容器崩溃恢复
 
 1. 停止崩溃容器
-2. 选择最近成功 Snapshot
-3. 启动新容器
-4. 注入 Snapshot
-5. 健康检查
-6. 失败则回退到上一个 Snapshot
+2. 立即对当前 soul 目录做崩溃快照（`source: "crash"`）
+3. 选择最近**成功**的 Snapshot 恢复
+4. 启动新容器
+5. 注入 Snapshot
+6. 健康检查
+7. 失败则回退到上一个 Snapshot
 
 ### 7.4 容器升级（蓝绿部署）
 
-1. 强制 Checkpoint
+1. 强制 Checkpoint（`source: "upgrade"`）
 2. 拉取新镜像
 3. 使用最近 Snapshot 启动新容器（green）
 4. 健康检查通过 → 切流量
 5. 停止旧容器
-6. 失败则回滚
+6. 失败则回滚到 Checkpoint
 
 ### 7.5 容器重置
 
 **Soft Reset**：
-- 指向 Snapshot#000001
-- 不删除历史
+- 恢复到 Snapshot#000001
+- 不删除历史快照
 
 **Factory Reset**：
 - 删除所有 Snapshots
@@ -651,21 +755,25 @@ iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py�
 | 工具记忆 | TOOLS.md 自动更新 | ✅ |
 | 推理展示 | thinking 浅色字体 + 最终 content 分离 | ✅ |
 
-### Phase 1 — 自主能力（下一步）
+### Phase 1 — 自主能力 + 基础备份（下一步）
 
-目标：agent 从"被动回答"进化为"主动行动"。
+目标：agent 从"被动回答"进化为"主动行动"，同时建立数据安全网。
 
 | 能力 | 实现方式 | 前端改动 | 后端改动 | 优先级 |
 |---|---|---|---|---|
+| **基础 Snapshot** | tar.zst + manifest.json（详见第 6 章） | 无 | 定时任务 + 控制面 API | ⭐⭐⭐ |
 | **Cron 定时任务** | 启用 cron 工具 + HEARTBEAT.md | 添加"定时任务"管理 UI | openclaw.json 启用 cron | ⭐⭐⭐ |
 | **Heartbeat 心跳** | 配置 heartbeat 周期 | 无（后台自动） | HEARTBEAT.md 配置检查项 | ⭐⭐⭐ |
 | **子 Agent 派生** | sessions_spawn（ping-pong） | 无（透明执行） | 启用 session tools | ⭐⭐ |
 | **ClawHub 技能** | 安装社区技能到 workspace/skills/ | 添加"技能市场"入口 | 无（agent 自行安装） | ⭐⭐ |
 
+> **为什么基础备份必须在 Phase 1？** 启用 cron/heartbeat 后 Agent 开始自主行动，如果出错必须能回滚。没有备份就启用自动化 = 裸奔。
+
 **预期效果**：
 - 用户说"每天早上 9 点帮我查天气" → agent 自动创建 cron
 - Agent 定期自主检查记忆、整理笔记
 - 复杂任务自动拆解为子任务
+- 任何操作出错 → 可从最近快照恢复
 
 ### Phase 2 — 浏览器自动化
 
@@ -701,6 +809,7 @@ RUN npx playwright install --with-deps chromium
 | **反爬虫抓取** | 复用 Phase 2 Playwright + Crawl4AI（开源自托管） | ✅ 本地部署 | 替代 Firecrawl（抓取国内站点效果差）；Playwright 已在 Phase 2 部署 | ⭐⭐ |
 | **语义嵌入** | SiliconFlow/bge-large-zh 或 Tencent Youtu | ✅ 国内直连 | 替代 OpenAI/Gemini（国内不可用）；国内模型中文 CMTEB 排名更高 | ⭐⭐ |
 | **Lobster 工作流** | 安装 Lobster CLI（容器内本地运行） | ✅ 无需外网 | 确定性流水线 + 审批门控，不依赖外部网络 | ⭐ |
+| **灵魂 JSON 结构化** | 备份时生成 soul_summary.json（详见第 6 章） | ✅ 本地 | 支持记忆查询、部分恢复、跨系统迁移 | ⭐⭐ |
 
 **国内替代方案说明：**
 
@@ -717,11 +826,14 @@ RUN npx playwright install --with-deps chromium
 | 能力 | 说明 | 优先级 |
 |---|---|---|
 | **订阅分级实施** | Free/Pro/Premium 模板 + 配额控制 | ⭐⭐⭐ |
-| **Snapshot 版本系统** | 定期备份 + 崩溃恢复 + 蓝绿升级 | ⭐⭐⭐ |
+| **容器热扩容** | 订阅升级 → 自动 `docker update` CPU/内存（详见第 7 章） | ⭐⭐⭐ |
+| **异地备份** | 快照加密后上传 OSS/S3，防宿主机单点故障 | ⭐⭐⭐ |
 | **Android 客户端** | Kotlin/Compose，复用后端 API | ⭐⭐ |
 | **Web 客户端** | React/Vue，轻量版入口 | ⭐⭐ |
 | **多用户容器编排** | K8s / Docker Swarm | ⭐ |
 | **Canvas WebView** | iOS App 内嵌 WebView 替代 node Canvas | ⭐ |
+
+> 注：基础 Snapshot 已在 Phase 1 实现，此处的重点是**异地冗余**和**多用户场景下的自动扩缩容**。
 
 ### Phase 5 — OpenClaw 替换（远期）
 
@@ -750,10 +862,11 @@ RUN npx playwright install --with-deps chromium
 5. ~~TOOLS.md 自动维护~~
 
 **立即做**（Phase 1）：
-1. 启用 Cron + Heartbeat
-2. 配置 HEARTBEAT.md 自动检查项
-3. 启用 sessions_spawn（子任务）
-4. 前端"定时任务"管理 UI
+1. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
+2. 启用 Cron + Heartbeat
+3. 配置 HEARTBEAT.md 自动检查项
+4. 启用 sessions_spawn（子任务）
+5. 前端"定时任务"管理 UI
 
 **1.0 后做**（Phase 2-3）：
 1. Docker 镜像安装 Chromium + Playwright
@@ -761,11 +874,13 @@ RUN npx playwright install --with-deps chromium
 3. 多模型智能路由（ZenMux 按任务复杂度自动切换）
 4. 语义嵌入升级（SiliconFlow/bge 或 Tencent Youtu）
 5. AI 增强搜索（Kimi/GLM 搜索 + Tavily）
+6. 灵魂 JSON 结构化提取（soul_summary.json）
 
 **长期规划**（Phase 4-5）：
-1. 订阅分级 + Snapshot 系统
-2. 多端客户端
-3. OpenClaw 模块逐步替换
+1. 订阅分级 + 容器热扩容
+2. 异地加密备份（OSS/S3）
+3. 多端客户端（Android/Web）
+4. OpenClaw 模块逐步替换
 
 **不要一开始做**：
 - 分布式架构
