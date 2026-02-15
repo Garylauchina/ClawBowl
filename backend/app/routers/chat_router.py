@@ -18,6 +18,21 @@ logger = logging.getLogger("clawbowl.chat")
 router = APIRouter(prefix="/api/v2", tags=["chat"])
 
 
+@router.get("/chat/warmup")
+async def warmup(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight endpoint to pre-warm the user's OpenClaw container.
+
+    Called by the iOS SplashView so the container is ready when the
+    user reaches the ChatView.  Returns immediately once the container
+    is in the 'running' state.
+    """
+    instance = await instance_manager.ensure_running(user, db)
+    return {"status": "warm", "port": instance.port}
+
+
 @router.post("/chat")
 async def chat(
     body: ChatRequest,

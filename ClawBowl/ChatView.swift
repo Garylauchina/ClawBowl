@@ -11,6 +11,8 @@ struct ChatView: View {
     @State private var isLoading = false
     @State private var showClearAlert = false
     @State private var showLogoutAlert = false
+    /// 轻量滚动触发器：streaming 时递增此值代替对整个 messages 的全量比较
+    @State private var scrollTrigger: UInt = 0
 
     var body: some View {
         NavigationStack {
@@ -32,10 +34,11 @@ struct ChatView: View {
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .onChange(of: messages.count) { _ in
+                        // 新消息加入时滚动到底部
                         scrollToBottom(proxy: proxy)
                     }
-                    .onChange(of: messages) { _ in
-                        // Scroll on every streaming update
+                    .onChange(of: scrollTrigger) { _ in
+                        // streaming 更新时滚动到底部（轻量计数器代替全量比较）
                         scrollToBottom(proxy: proxy)
                     }
                 }
@@ -171,6 +174,7 @@ struct ChatView: View {
                             } else {
                                 messages[idx].content += text  // 追加（后续）
                             }
+                            scrollTrigger &+= 1
                         case .done:
                             messages[idx].isStreaming = false
                             // 如果有正式 content → 清除 thinking
