@@ -1,4 +1,4 @@
-# ClawBowl 系统设计文档（V4）
+# ClawBowl 系统设计文档（V5）
 
 > 最后更新：2026-02-15
 
@@ -308,13 +308,13 @@ Agent 回复中可夹带**结构化指令**，iOS App 解析后执行本地操�
 
 ## 10. 前端上下文管理
 
-### 9.1 架构（混合方案）
+### 10.1 架构（混合方案）
 
 - **权威数据源**：OpenClaw 容器内的会话记录（`agents/main/sessions/`）
 - **后端 API**：`GET /api/v2/chat/history?limit=20&before={timestamp}` 从容器读取
 - **iOS 本地缓存**：SwiftData 持久化，按用户隔离
 
-### 9.2 交互流程
+### 10.2 交互流程
 
 - **登录时**：先显示本地缓存（毫秒级），后台静默同步最新会话
 - **发消息时**：同步写入本地缓存 + 发送后端
@@ -332,7 +332,7 @@ Agent 回复中可夹带**结构化指令**，iOS App 解析后执行本地操�
 | read / write / edit | 文件操作 | 极低 |
 | exec / process | Shell 命令与后台进程 | 中（CPU） |
 | image | 视觉模型分析图片 | Token（视觉模型） |
-| web_search | 网页搜索（Brave） | API 调用 |
+| web_search | 网页搜索（Tavily，原 Brave 国内不可用） | API 调用 |
 | web_fetch | 获取网页内容 | 低 |
 | browser | Chromium 自动化 | 高（内存 300MB+） |
 | cron | 定时任务 | 中（每次执行消耗 Token） |
@@ -382,11 +382,11 @@ Agent 回复中可夹带**结构化指令**，iOS App 解析后执行本地操�
 | 文件 | 完整 | workspace 限 500MB |
 | Shell | 完整 | 允许网络 |
 | 网页 | 搜索 + 读取 | 各 100 次/天 |
-| 记忆 | 完整 + Gemini 嵌入 | 记忆文件限 50MB |
+| 记忆 | 完整 + 远程嵌入（bge/Youtu） | 记忆文件限 50MB |
 | 技能 | 全部 + 社区技能 | 无限 |
 | 自动化 | cron + heartbeat | 最多 5 个定时任务 |
 | 浏览器 | 基础 | 单标签页 |
-| 消息通道 | Telegram / Discord | 2 个通道（自带 token） |
+| 消息通道 | 预留（未来可扩展微信/企微） | — |
 | 容器 | CPU: 0.75, 内存: 1.5GB | — |
 | 备份 | 每 5 分钟 | 保留 30 个 snapshot |
 
@@ -400,11 +400,11 @@ Agent 回复中可夹带**结构化指令**，iOS App 解析后执行本地操�
 | 文件 | 完整 | workspace 限 2GB |
 | Shell | 完整 | — |
 | 网页 | 搜索 + 读取 + 反爬虫 | 无限 |
-| 记忆 | 完整 + 高级嵌入 | 无限制 |
+| 记忆 | 完整 + 高级嵌入（Youtu/本地部署） | 无限制 |
 | 技能 | 全部 | — |
 | 自动化 | cron + heartbeat | 无限 |
 | 浏览器 | 完整自动化 | 多标签页 |
-| 消息通道 | 全部 8+ 通道 | 无限 |
+| 消息通道 | 全通道（微信/企微/飞书等） | 无限 |
 | 容器 | CPU: 1.0, 内存: 2GB | — |
 | 备份 | 每 1 分钟 | 无限 snapshot |
 
@@ -435,23 +435,7 @@ Secrets：
 
 ---
 
-## 15. 与 Manus 沙盒的差异
-
-| 维度 | Manus | ClawBowl |
-|------|-------|----------|
-| 沙盒生命周期 | 短任务 | 常驻 |
-| 状态 | 临时 | 持久 |
-| 版本管理 | 无 | Snapshot |
-| 用户身份 | 任务级 | Runtime 级 |
-| 升级机制 | 无需 | 蓝绿部署 |
-| 记忆 | 无 | 长期记忆 |
-| 技能 | 预设 | 可自定义 + 社区 |
-
-**ClawBowl 的本质**：把"任务沙盒"升级为"可版本化的个人 Agent 操作系统实例"。
-
----
-
-## 16. 技术栈
+## 15. 技术栈
 
 | 层 | 技术 |
 |----|------|
@@ -465,7 +449,7 @@ Secrets：
 
 ---
 
-## 17. 产品定位与竞品差异
+## 16. 产品定位与竞品差异
 
 ### 16.1 产品定位
 
@@ -530,11 +514,11 @@ iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py�
 
 ---
 
-## 18. 国内 LLM 生态与 ClawBowl 模型策略
+## 17. 国内 LLM 生态与 ClawBowl 模型策略
 
 > 更新时间：2026-02-15
 
-### 18.1 全球前沿模型最新格局（截至 2026-02-15）
+### 17.1 全球前沿模型最新格局（截至 2026-02-15）
 
 2026 年 2 月，国际和国内同时迎来模型密集发布期。国内模型与国际第一梯队的差距已从约 7 个月缩短至约 3 个月。
 
@@ -560,7 +544,7 @@ iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py�
 | **MiniMax 2.5** | MiniMax | 10B 激活 | — | 100 TPS 高吞吐，轻量开发者友好 | — |
 | **豆包 2.0** | 字节跳动 | — | — | 日活最高，语音交互最佳，多模态（图/视频生成） | — |
 
-### 18.2 关键能力基准对比
+### 17.2 关键能力基准对比
 
 #### 编程能力
 
@@ -607,7 +591,7 @@ iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py�
 
 > **成本差距惊人**：国内模型成本仅为国际模型的 1/50 ~ 1/200，且均为开源（MIT）。这意味着 ClawBowl 可以在极低成本下提供接近国际顶级的 Agent 能力。
 
-### 18.3 ClawBowl 的 LLM 策略
+### 17.3 ClawBowl 的 LLM 策略
 
 #### 当前配置
 
@@ -649,7 +633,7 @@ iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py�
 
 ---
 
-## 19. OpenClaw 功能激活路径
+## 18. OpenClaw 功能激活路径
 
 ### Phase 0 — 核心基础 ✅（已完成）
 
@@ -707,13 +691,23 @@ RUN npx playwright install --with-deps chromium
 
 目标：更强的模型、更丰富的数据源、更智能的工作流。
 
-| 能力 | 实现方式 | 说明 | 优先级 |
-|---|---|---|---|
-| **多模型切换** | LLM 管理模块 + 前端选择器 | 简单问题用免费模型，复杂问题用旗舰 | ⭐⭐⭐ |
-| **Perplexity 搜索** | 配置 PERPLEXITY_API_KEY | AI 合成答案，比 Brave 更智能 | ⭐⭐ |
-| **Firecrawl 反爬虫** | 配置 FIRECRAWL_API_KEY | 处理反爬虫网站 | ⭐ |
-| **远程嵌入** | Gemini/OpenAI embeddings | 更精准的语义搜索 | ⭐⭐ |
-| **Lobster 工作流** | 安装 Lobster CLI | 确定性流水线 + 审批门控 | ⭐ |
+> **国内网络适配**：Phase 3 的所有功能均基于国内可达的服务和开源方案，不依赖被封锁的境外 API。
+
+| 能力 | 实现方式 | 国内可行性 | 说明 | 优先级 |
+|---|---|---|---|---|
+| **多模型智能路由** | ZenMux 管理模块（无前端选择器） | ✅ 国内模型 | 后端按任务复杂度自动路由：简单→免费模型，复杂→旗舰 | ⭐⭐⭐ |
+| **AI 增强搜索** | Kimi/GLM 搜索增强 API + Tavily 备用 | ✅ 国内直连 | 替代 Perplexity（国内被封锁）；国内 LLM 自带搜索覆盖国内站点更全 | ⭐⭐ |
+| **反爬虫抓取** | 复用 Phase 2 Playwright + Crawl4AI（开源自托管） | ✅ 本地部署 | 替代 Firecrawl（抓取国内站点效果差）；Playwright 已在 Phase 2 部署 | ⭐⭐ |
+| **语义嵌入** | SiliconFlow/bge-large-zh 或 Tencent Youtu | ✅ 国内直连 | 替代 OpenAI/Gemini（国内不可用）；国内模型中文 CMTEB 排名更高 | ⭐⭐ |
+| **Lobster 工作流** | 安装 Lobster CLI（容器内本地运行） | ✅ 无需外网 | 确定性流水线 + 审批门控，不依赖外部网络 | ⭐ |
+
+**国内替代方案说明：**
+
+| 原方案（国内不可用） | 替代方案 | 优势 |
+|---|---|---|
+| Perplexity API | Kimi 搜索增强 / GLM Web Search / Tavily | 国内站点覆盖更全，中文结果更好 |
+| Firecrawl | Playwright 自建 + Crawl4AI | 免费，对国内反爬虫站点兼容性更好 |
+| OpenAI/Gemini Embeddings | bge-large-zh (SiliconFlow) / Tencent Youtu | CMTEB 中文排名 #1-#2，接口兼容 OpenAI 格式 |
 
 ### Phase 4 — 平台化
 
@@ -745,7 +739,7 @@ RUN npx playwright install --with-deps chromium
 
 ---
 
-## 20. 当前阶段实施优先级
+## 19. 当前阶段实施优先级
 
 **已完成** ✅：
 1. ~~容器目录结构~~
@@ -763,8 +757,9 @@ RUN npx playwright install --with-deps chromium
 **1.0 后做**（Phase 2-3）：
 1. Docker 镜像安装 Chromium + Playwright
 2. 浏览器自动化启用
-3. 多模型切换 UI
-4. 远程嵌入 + Perplexity
+3. 多模型智能路由（ZenMux 按任务复杂度自动切换）
+4. 语义嵌入升级（SiliconFlow/bge 或 Tencent Youtu）
+5. AI 增强搜索（Kimi/GLM 搜索 + Tavily）
 
 **长期规划**（Phase 4-5）：
 1. 订阅分级 + Snapshot 系统
@@ -780,7 +775,7 @@ RUN npx playwright install --with-deps chromium
 
 ---
 
-## 21. 架构核心总结
+## 20. 架构核心总结
 
 ClawBowl 的核心不是"跑 OpenClaw"。
 
@@ -801,5 +796,6 @@ OpenClaw 是当前的能力底座，但不是不可替代的依赖。
 **可替换模块（供应商）**：
 - OpenClaw（沙盒 + Agent Loop）→ 可自建
 - DeepSeek / GLM / Qwen / ZenMux（LLM 提供商）→ 多模型智能路由
-- Tavily Search（搜索 API，已替换不可用的 Brave Search）→ 可换 SerpAPI/Bing
-- 本地嵌入 / Gemini（记忆检索）→ 可换 OpenAI/Voyage
+- Tavily / Kimi 搜索 / GLM Web Search（搜索 API）→ 多供应商互备
+- SiliconFlow/bge / Tencent Youtu（语义嵌入）→ 国内可达，兼容 OpenAI 格式
+- Playwright + Crawl4AI（反爬虫抓取）→ 开源自托管
