@@ -262,9 +262,18 @@ async def proxy_chat_request(
 # ── Streaming request ─────────────────────────────────────────────────
 
 def _make_thinking_chunk(message: str) -> str:
-    """Build an SSE line with a 'thinking' delta for tool status display."""
+    """Build an SSE line with a 'thinking' delta for real-time status display."""
     payload = json.dumps(
         {"choices": [{"delta": {"thinking": message}}]},
+        ensure_ascii=False,
+    )
+    return f"data: {payload}\n\n"
+
+
+def _make_content_chunk(text: str) -> str:
+    """Build an SSE line with a 'content' delta."""
+    payload = json.dumps(
+        {"choices": [{"delta": {"content": text}}]},
         ensure_ascii=False,
     )
     return f"data: {payload}\n\n"
@@ -277,14 +286,22 @@ async def proxy_chat_stream(
 ) -> AsyncGenerator[str, None]:
     """Forward a chat completion request and yield SSE lines in real time.
 
-    - delta.content 行原样透传
-    - delta.tool_calls 行转换为 delta.thinking 状态行
+    Agent 模式检测：
+    - 在检测到第一个 tool_calls 之前，delta.content 按正常 content 透传
+    - 检测到 tool_calls 后进入 Agent 模式：
+      · 所有 delta.content 转为 delta.thinking（浅色字体实时显示）
+      · delta.tool_calls 转为工具状态的 delta.thinking
+      · finish_reason: "tool_calls" → 清空当前轮缓冲，准备下一轮
+      · finish_reason: "stop" → 将最后一轮内容作为正式 delta.content 发送
     - data: [DONE] 最终透传
     """
     messages = _preprocess_attachments(instance, messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream=True)
 
-    seen_tools: set[str] = set()  # avoid duplicate status for same tool call
+    seen_tools: set[str] = set()
+    in_agent_mode = False       # True after first tool_call is detected
+    turn_content_buf: list[str] = []  # buffer content for current agent turn
+    thinking_started = False    # track if any thinking has been emitted
 
     last_exc: Exception | None = None
     for attempt in range(2):
@@ -299,6 +316,10 @@ async def proxy_chat_stream(
 
                         # data: [DONE]
                         if line == "data: [DONE]":
+                            # Flush remaining buffer as content (safety net)
+                            if turn_content_buf and in_agent_mode:
+                                yield _make_content_chunk("".join(turn_content_buf))
+                                turn_content_buf.clear()
                             yield "data: [DONE]\n\n"
                             return
 
@@ -309,7 +330,6 @@ async def proxy_chat_stream(
                         try:
                             chunk = json.loads(line[6:])
                         except json.JSONDecodeError:
-                            # Forward unparseable lines as-is
                             yield line + "\n\n"
                             continue
 
@@ -319,10 +339,13 @@ async def proxy_chat_stream(
                             continue
 
                         delta = choices[0].get("delta", {})
+                        finish_reason = choices[0].get("finish_reason")
 
-                        # ── Tool calls → inject thinking status ──
+                        # ── Tool calls → enter agent mode, emit thinking ──
                         tool_calls = delta.get("tool_calls")
                         if tool_calls:
+                            if not in_agent_mode:
+                                in_agent_mode = True
                             for tc in tool_calls:
                                 fn = tc.get("function", {})
                                 tool_name = fn.get("name", "")
@@ -331,19 +354,35 @@ async def proxy_chat_stream(
                                     status = _TOOL_STATUS_MAP.get(
                                         tool_name, f"正在执行 {tool_name}..."
                                     )
-                                    yield _make_thinking_chunk(status)
-                            # Don't forward raw tool_calls to client
-                            continue
+                                    prefix = "\n" if thinking_started else ""
+                                    yield _make_thinking_chunk(prefix + status)
+                                    thinking_started = True
+                            # Don't forward raw tool_calls; fall through to finish_reason
 
-                        # ── Content text → forward as-is ──
-                        if delta.get("content"):
-                            yield line + "\n\n"
-                            continue
+                        # ── Content text ──
+                        elif delta.get("content"):
+                            content_text = delta["content"]
+                            if in_agent_mode:
+                                # Agent mode: send as thinking + buffer for final re-emit
+                                yield _make_thinking_chunk(content_text)
+                                turn_content_buf.append(content_text)
+                                thinking_started = True
+                            else:
+                                # Normal mode: forward as content
+                                yield line + "\n\n"
 
-                        # ── Other deltas (role, finish_reason, etc.) → forward ──
-                        yield line + "\n\n"
+                        # ── Finish reason (processed for ALL chunks) ──
+                        if finish_reason == "tool_calls":
+                            # Reasoning turn ended, clear buffer for next turn
+                            turn_content_buf.clear()
+                        elif finish_reason == "stop":
+                            # Final turn — re-emit buffered content as real content
+                            if turn_content_buf and in_agent_mode:
+                                full_text = "".join(turn_content_buf)
+                                yield _make_content_chunk(full_text)
+                                turn_content_buf.clear()
 
-            # If we reach here the stream completed successfully
+            # Stream completed successfully
             return
 
         except (httpx.ConnectError, httpx.ReadError) as exc:

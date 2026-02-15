@@ -155,13 +155,16 @@ struct ChatView: View {
                         guard let idx = messages.firstIndex(where: { $0.id == placeholderID }) else { return }
                         switch event {
                         case .thinking(let status):
-                            messages[idx].thinkingText = status
+                            // 追加模式：逐行累积显示推理过程
+                            messages[idx].thinkingText += status
                         case .content(let text):
-                            // 收到正式内容后清除推理过程
+                            // 收到正式内容 → 清除推理过程，显示最终结果
                             if !messages[idx].thinkingText.isEmpty {
                                 messages[idx].thinkingText = ""
+                                messages[idx].content = text  // 替换（首次）
+                            } else {
+                                messages[idx].content += text  // 追加（后续）
                             }
-                            messages[idx].content += text
                         case .done:
                             messages[idx].isStreaming = false
                             messages[idx].thinkingText = ""

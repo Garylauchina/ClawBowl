@@ -45,16 +45,26 @@ struct MessageBubble: View {
                         }
                     }
 
-                    // 思考状态（浅色斜体小字，类似 Claude 的思考过程）
+                    // 思考过程（浅色斜体小字，实时累积显示）
                     if !message.thinkingText.isEmpty {
-                        HStack(spacing: 4) {
-                            Image(systemName: "gear")
-                                .font(.caption2)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "gear")
+                                    .font(.caption2)
+                                Text("思考中...")
+                                    .font(.caption2)
+                                    .bold()
+                            }
+                            .foregroundColor(.secondary.opacity(0.6))
+
                             Text(message.thinkingText)
                                 .font(.caption)
                                 .italic()
+                                .foregroundColor(.secondary.opacity(0.7))
+                                .lineLimit(nil)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        .foregroundColor(.secondary.opacity(0.7))
+                        .frame(maxHeight: 120)
                     }
 
                     // 文本（如果有）
