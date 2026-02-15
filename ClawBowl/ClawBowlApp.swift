@@ -3,24 +3,33 @@ import SwiftUI
 @main
 struct ClawBowlApp: App {
     @StateObject private var authService = AuthService.shared
-    @State private var showSplash = true
+    @State private var splashDone = false
 
     var body: some Scene {
         WindowGroup {
-            Group {
-                if showSplash && authService.isAuthenticated {
+            ZStack {
+                // 始终铺底深色，消除白→深色的闪烁
+                Color(red: 0.05, green: 0.05, blue: 0.15)
+                    .ignoresSafeArea()
+
+                if !splashDone {
+                    // Splash 始终作为第一屏（不依赖 auth 状态）
                     SplashView {
-                        withAnimation(.easeInOut(duration: 0.4)) {
-                            showSplash = false
+                        withAnimation(.easeInOut(duration: 0.5)) {
+                            splashDone = true
                         }
                     }
+                    .transition(.opacity)
                 } else if authService.isAuthenticated {
                     ChatView()
                         .environment(\.authService, authService)
+                        .transition(.opacity)
                 } else {
                     AuthView(authService: authService)
+                        .transition(.opacity)
                 }
             }
+            .animation(.easeInOut(duration: 0.4), value: splashDone)
             .animation(.easeInOut, value: authService.isAuthenticated)
         }
     }
@@ -28,14 +37,15 @@ struct ClawBowlApp: App {
 
 // MARK: - Splash View
 
-/// 启动欢迎屏：显示 Logo + 随机趣味提示语，同时后台预热容器
+/// 启动欢迎屏：Logo + 随机趣味提示语，同时后台预热容器
 struct SplashView: View {
     let onFinish: () -> Void
 
-    @State private var logoScale: CGFloat = 0.6
-    @State private var logoOpacity: Double = 0
-    @State private var textOpacity: Double = 0
+    // Logo 弹跳动画（从略小→标准尺寸，但始终可见）
+    @State private var logoScale: CGFloat = 0.85
+    @State private var pulseScale: CGFloat = 1.0
     @State private var dotCount = 0
+    @State private var timerRef: Timer?
 
     /// 随机趣味提示语
     private static let tips = [
@@ -56,102 +66,85 @@ struct SplashView: View {
     private let tip = tips.randomElement() ?? "加载中"
 
     var body: some View {
-        ZStack {
-            // 背景渐变
-            LinearGradient(
-                colors: [
-                    Color(red: 0.05, green: 0.05, blue: 0.15),
-                    Color(red: 0.1, green: 0.1, blue: 0.25),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
+        VStack(spacing: 24) {
+            Spacer()
 
-            VStack(spacing: 24) {
-                Spacer()
-
-                // Logo
-                Image(systemName: "bubble.left.and.bubble.right.fill")
-                    .font(.system(size: 72))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [.blue, .cyan, .teal],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
+            // Logo — 始终可见，仅做弹跳+脉冲动画
+            Image(systemName: "bubble.left.and.bubble.right.fill")
+                .font(.system(size: 72))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.blue, .cyan, .teal],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     )
-                    .scaleEffect(logoScale)
-                    .opacity(logoOpacity)
+                )
+                .scaleEffect(logoScale * pulseScale)
 
-                // 标题
-                Text("ClawBowl")
-                    .font(.system(size: 36, weight: .bold, design: .rounded))
-                    .foregroundColor(.white)
-                    .opacity(logoOpacity)
+            // 标题 — 始终可见
+            Text("ClawBowl")
+                .font(.system(size: 36, weight: .bold, design: .rounded))
+                .foregroundColor(.white)
 
-                Spacer()
+            Spacer()
 
-                // 趣味提示
-                Text(tip + String(repeating: ".", count: dotCount))
-                    .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.6))
-                    .opacity(textOpacity)
-                    .frame(height: 20)
+            // 趣味提示 — 始终可见
+            Text(tip + String(repeating: ".", count: dotCount))
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.6))
+                .frame(height: 20)
 
-                Spacer()
-                    .frame(height: 60)
-            }
+            Spacer()
+                .frame(height: 60)
         }
         .onAppear {
             startAnimations()
             startWarmup()
         }
+        .onDisappear {
+            timerRef?.invalidate()
+            timerRef = nil
+        }
     }
 
     private func startAnimations() {
-        // Logo 入场
-        withAnimation(.spring(response: 0.8, dampingFraction: 0.6)) {
+        // Logo 弹入（从 0.85 → 1.0，很快）
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
             logoScale = 1.0
-            logoOpacity = 1.0
         }
 
-        // 提示语渐入
-        withAnimation(.easeIn(duration: 0.6).delay(0.4)) {
-            textOpacity = 1.0
+        // 持续脉冲呼吸动画
+        withAnimation(
+            .easeInOut(duration: 1.2)
+            .repeatForever(autoreverses: true)
+        ) {
+            pulseScale = 1.06
         }
 
-        // 加载点动画
-        Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { timer in
+        // 加载点循环动画
+        timerRef = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
             dotCount = (dotCount + 1) % 4
-            if !showingSplash {
-                timer.invalidate()
-            }
         }
     }
 
-    // 追踪是否还在显示（用于停止 timer）
-    @State private var showingSplash = true
-
     private func startWarmup() {
-        let minimumDisplayTime: UInt64 = 1_800_000_000  // 1.8 秒
+        // 最低显示 2.5 秒（用户能充分看到内容）
+        let minimumDisplayNanos: UInt64 = 2_500_000_000
 
         Task {
-            // 并行：预热容器 + 最低显示时间
             async let warmup: () = warmupContainer()
-            async let delay: () = Task.sleep(nanoseconds: minimumDisplayTime)
+            async let delay: () = Task.sleep(nanoseconds: minimumDisplayNanos)
 
             _ = try? await warmup
             _ = try? await delay
 
             await MainActor.run {
-                showingSplash = false
                 onFinish()
             }
         }
     }
 
-    /// 预热后端容器（fire-and-forget）
+    /// 预热后端容器
     private func warmupContainer() async {
         guard let token = AuthService.shared.accessToken,
               let url = URL(string: "https://prometheusclothing.net/api/v2/chat/warmup") else {
