@@ -311,6 +311,10 @@ async def proxy_chat_stream(
     last_content_ts = 0.0         # monotonic time of last content chunk
     turn_count = 1                # current turn number
     chunk_count = 0               # total chunks (for logging)
+    # ── Thinking 节流：攒够一定字符再发，减少 SSE 事件数 ──
+    thinking_batch: list[str] = []
+    thinking_batch_chars = 0
+    _THINKING_BATCH_CHARS = 80    # 每攒够 80 字符发一次 thinking
 
     last_exc: Exception | None = None
     for attempt in range(2):
@@ -325,6 +329,12 @@ async def proxy_chat_stream(
 
                         # data: [DONE]
                         if line == "data: [DONE]":
+                            # Flush any pending thinking batch
+                            if thinking_batch:
+                                yield _make_thinking_chunk(
+                                    "".join(thinking_batch)
+                                )
+                                thinking_batch.clear()
                             # Emit last turn's buffer as real content
                             if content_buf:
                                 final = "".join(content_buf).strip()
@@ -356,36 +366,11 @@ async def proxy_chat_stream(
                         finish_reason = choice.get("finish_reason")
                         chunk_count += 1
 
-                        # ── 详细日志：捕获完整 chunk 结构 ──
-                        # 前 10 个 + 轮次边界 + 最后的
-                        now_ts = time.monotonic()
-                        gap_from_last = (
-                            now_ts - last_content_ts
-                            if last_content_ts > 0
-                            else 0.0
-                        )
-                        is_boundary = gap_from_last > _TURN_GAP_SECONDS
-                        if (
-                            chunk_count <= 10
-                            or is_boundary
-                            or finish_reason
-                            or chunk_count % 200 == 0
-                        ):
-                            # Log the FULL choice object (truncate content to 80 chars)
-                            log_choice = dict(choice)
-                            log_delta = dict(delta)
-                            if log_delta.get("content"):
-                                c = log_delta["content"]
-                                log_delta["content"] = (
-                                    c[:80] + "..." if len(c) > 80 else c
-                                )
-                            log_choice["delta"] = log_delta
+                        # Sampled logging
+                        if chunk_count <= 3 or finish_reason:
                             logger.info(
-                                "SSE #%d (gap=%.1fs turn=%d): %s",
-                                chunk_count,
-                                gap_from_last,
-                                turn_count,
-                                json.dumps(log_choice, ensure_ascii=False),
+                                "SSE #%d: finish=%s turn=%d",
+                                chunk_count, finish_reason, turn_count,
                             )
 
                         # ── Tool calls → emit thinking status ──
@@ -412,7 +397,14 @@ async def proxy_chat_stream(
                             if last_content_ts > 0:
                                 gap = now - last_content_ts
                                 if gap > _TURN_GAP_SECONDS:
-                                    # 新轮次：清空缓冲 + 在 thinking 中插入分隔
+                                    # 新轮次：先 flush 积攒的 thinking
+                                    if thinking_batch:
+                                        yield _make_thinking_chunk(
+                                            "".join(thinking_batch)
+                                        )
+                                        thinking_batch.clear()
+                                        thinking_batch_chars = 0
+                                    # 清空缓冲 + 在 thinking 中插入分隔
                                     content_buf.clear()
                                     turn_count += 1
                                     if thinking_emitted:
@@ -423,20 +415,39 @@ async def proxy_chat_stream(
                                     )
 
                             last_content_ts = now
-
-                            # Stream as thinking + buffer
-                            yield _make_thinking_chunk(content_text)
                             content_buf.append(content_text)
-                            thinking_emitted = True
+
+                            # 节流 thinking：攒够字符再发（减少 SSE 事件 ~10x）
+                            thinking_batch.append(content_text)
+                            thinking_batch_chars += len(content_text)
+                            if thinking_batch_chars >= _THINKING_BATCH_CHARS:
+                                yield _make_thinking_chunk(
+                                    "".join(thinking_batch)
+                                )
+                                thinking_batch.clear()
+                                thinking_batch_chars = 0
+                                thinking_emitted = True
 
                         # ── Finish reason (protocol-level markers) ──
                         if finish_reason == "tool_calls":
+                            if thinking_batch:
+                                yield _make_thinking_chunk(
+                                    "".join(thinking_batch)
+                                )
+                                thinking_batch.clear()
+                                thinking_batch_chars = 0
                             content_buf.clear()
                             turn_count += 1
                             if thinking_emitted:
                                 yield _make_thinking_chunk("\n\n")
                             logger.info("Turn ended (tool_calls) → turn %d", turn_count)
                         elif finish_reason == "stop":
+                            if thinking_batch:
+                                yield _make_thinking_chunk(
+                                    "".join(thinking_batch)
+                                )
+                                thinking_batch.clear()
+                                thinking_batch_chars = 0
                             if content_buf:
                                 final = "".join(content_buf).strip()
                                 if final:

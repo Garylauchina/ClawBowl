@@ -157,6 +157,12 @@ struct ChatView: View {
                         case .thinking(let status):
                             // 追加模式：逐行累积显示推理过程
                             messages[idx].thinkingText += status
+                            // 截断超长文本防止 UI 卡顿（保留最近 800 字符）
+                            if messages[idx].thinkingText.count > 1000 {
+                                let text = messages[idx].thinkingText
+                                let start = text.index(text.endIndex, offsetBy: -800)
+                                messages[idx].thinkingText = "…" + String(text[start...])
+                            }
                         case .content(let text):
                             // 收到正式内容 → 清除推理过程，显示最终结果
                             if !messages[idx].thinkingText.isEmpty {
