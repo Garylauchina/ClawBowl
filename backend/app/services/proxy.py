@@ -286,22 +286,20 @@ async def proxy_chat_stream(
 ) -> AsyncGenerator[str, None]:
     """Forward a chat completion request and yield SSE lines in real time.
 
-    Agent 模式检测：
-    - 在检测到第一个 tool_calls 之前，delta.content 按正常 content 透传
-    - 检测到 tool_calls 后进入 Agent 模式：
-      · 所有 delta.content 转为 delta.thinking（浅色字体实时显示）
-      · delta.tool_calls 转为工具状态的 delta.thinking
-      · finish_reason: "tool_calls" → 清空当前轮缓冲，准备下一轮
-      · finish_reason: "stop" → 将最后一轮内容作为正式 delta.content 发送
-    - data: [DONE] 最终透传
+    所有 delta.content 先作为 delta.thinking 流式发送（客户端浅色字体实时显示），
+    同时缓冲内容。当检测到轮次结束时：
+    - finish_reason: "tool_calls" → 清空当前轮缓冲（推理文本不保留）
+    - finish_reason: "stop" / [DONE] → 将最后一轮缓冲作为 delta.content 发送（正式回答）
+
+    效果：推理过程实时以浅色字体显示 → 完成后推理清除 → 只保留最终结果。
     """
     messages = _preprocess_attachments(instance, messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream=True)
 
     seen_tools: set[str] = set()
-    in_agent_mode = False       # True after first tool_call is detected
-    turn_content_buf: list[str] = []  # buffer content for current agent turn
-    thinking_started = False    # track if any thinking has been emitted
+    content_buf: list[str] = []   # buffer content for current turn
+    thinking_emitted = False      # any thinking sent yet?
+    chunk_count = 0               # total chunks received (for logging)
 
     last_exc: Exception | None = None
     for attempt in range(2):
@@ -316,11 +314,15 @@ async def proxy_chat_stream(
 
                         # data: [DONE]
                         if line == "data: [DONE]":
-                            # Flush remaining buffer as content (safety net)
-                            if turn_content_buf and in_agent_mode:
-                                yield _make_content_chunk("".join(turn_content_buf))
-                                turn_content_buf.clear()
+                            # Flush remaining buffer as real content
+                            if content_buf:
+                                yield _make_content_chunk("".join(content_buf))
+                                content_buf.clear()
                             yield "data: [DONE]\n\n"
+                            logger.debug(
+                                "SSE stream done: %d chunks, %d tools seen",
+                                chunk_count, len(seen_tools),
+                            )
                             return
 
                         if not line.startswith("data: "):
@@ -340,12 +342,19 @@ async def proxy_chat_stream(
 
                         delta = choices[0].get("delta", {})
                         finish_reason = choices[0].get("finish_reason")
+                        chunk_count += 1
 
-                        # ── Tool calls → enter agent mode, emit thinking ──
+                        # Debug log (sample: first 5 + every 20th + finish)
+                        if chunk_count <= 5 or chunk_count % 20 == 0 or finish_reason:
+                            delta_keys = [k for k in delta if delta[k]]
+                            logger.debug(
+                                "SSE #%d: delta_keys=%s finish=%s",
+                                chunk_count, delta_keys, finish_reason,
+                            )
+
+                        # ── Tool calls → emit thinking status ──
                         tool_calls = delta.get("tool_calls")
                         if tool_calls:
-                            if not in_agent_mode:
-                                in_agent_mode = True
                             for tc in tool_calls:
                                 fn = tc.get("function", {})
                                 tool_name = fn.get("name", "")
@@ -354,33 +363,28 @@ async def proxy_chat_stream(
                                     status = _TOOL_STATUS_MAP.get(
                                         tool_name, f"正在执行 {tool_name}..."
                                     )
-                                    prefix = "\n" if thinking_started else ""
+                                    prefix = "\n" if thinking_emitted else ""
                                     yield _make_thinking_chunk(prefix + status)
-                                    thinking_started = True
-                            # Don't forward raw tool_calls; fall through to finish_reason
+                                    thinking_emitted = True
 
-                        # ── Content text ──
-                        elif delta.get("content"):
-                            content_text = delta["content"]
-                            if in_agent_mode:
-                                # Agent mode: send as thinking + buffer for final re-emit
-                                yield _make_thinking_chunk(content_text)
-                                turn_content_buf.append(content_text)
-                                thinking_started = True
-                            else:
-                                # Normal mode: forward as content
-                                yield line + "\n\n"
+                        # ── Content text → stream as thinking + buffer ──
+                        content_text = delta.get("content")
+                        if content_text:
+                            yield _make_thinking_chunk(content_text)
+                            content_buf.append(content_text)
+                            thinking_emitted = True
 
-                        # ── Finish reason (processed for ALL chunks) ──
+                        # ── Finish reason ──
                         if finish_reason == "tool_calls":
-                            # Reasoning turn ended, clear buffer for next turn
-                            turn_content_buf.clear()
+                            # Agent turn ended → reasoning discarded, start fresh
+                            content_buf.clear()
+                            logger.debug("Turn ended (tool_calls), buffer cleared")
                         elif finish_reason == "stop":
-                            # Final turn — re-emit buffered content as real content
-                            if turn_content_buf and in_agent_mode:
-                                full_text = "".join(turn_content_buf)
-                                yield _make_content_chunk(full_text)
-                                turn_content_buf.clear()
+                            # Final turn → emit buffered content as real content
+                            if content_buf:
+                                yield _make_content_chunk("".join(content_buf))
+                                content_buf.clear()
+                                logger.debug("Final turn (stop), content emitted")
 
             # Stream completed successfully
             return
