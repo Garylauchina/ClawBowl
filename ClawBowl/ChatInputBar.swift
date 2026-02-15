@@ -83,18 +83,28 @@ struct ChatInputBar: View {
                             .foregroundStyle(.blue)
                     }
                 } else {
-                    // 无内容时显示语音按钮
-                    Button {
-                        toggleRecording()
-                    } label: {
-                        Image(systemName: speechManager.isRecording ? "mic.fill" : "mic")
-                            .font(.system(size: 20))
-                            .foregroundStyle(speechManager.isRecording ? .red : .secondary)
-                            .frame(width: 34, height: 34)
-                            .background(speechManager.isRecording ? Color.red.opacity(0.15) : Color.clear)
-                            .clipShape(Circle())
-                    }
-                    .disabled(isLoading)
+                    // 无内容时显示语音按钮（按住说话，松开停止）
+                    Image(systemName: speechManager.isRecording ? "mic.fill" : "mic")
+                        .font(.system(size: 20))
+                        .foregroundStyle(speechManager.isRecording ? .red : .secondary)
+                        .frame(width: 34, height: 34)
+                        .background(speechManager.isRecording ? Color.red.opacity(0.15) : Color.clear)
+                        .clipShape(Circle())
+                        .opacity(isLoading ? 0.4 : 1.0)
+                        .gesture(
+                            isLoading ? nil :
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { _ in
+                                    if !speechManager.isRecording {
+                                        speechManager.startRecording()
+                                    }
+                                }
+                                .onEnded { _ in
+                                    if speechManager.isRecording {
+                                        speechManager.stopRecording()
+                                    }
+                                }
+                        )
                 }
             }
             .padding(.horizontal, 12)
@@ -145,16 +155,10 @@ struct ChatInputBar: View {
                 .frame(width: 8, height: 8)
                 .opacity(speechManager.isRecording ? 1 : 0)
                 .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: speechManager.isRecording)
-            Text("正在听取语音...")
+            Text("正在听取，松开结束")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Spacer()
-            Button("取消") {
-                speechManager.stopRecording()
-                text = ""
-            }
-            .font(.caption)
-            .foregroundColor(.red)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
@@ -213,16 +217,6 @@ struct ChatInputBar: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(Color(.systemGray6).opacity(0.5))
-    }
-
-    // MARK: - 语音录制控制
-
-    private func toggleRecording() {
-        if speechManager.isRecording {
-            speechManager.stopRecording()
-        } else {
-            speechManager.startRecording()
-        }
     }
 
     /// 有文字或有附件即可发送
