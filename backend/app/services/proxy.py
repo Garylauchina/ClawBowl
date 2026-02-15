@@ -288,10 +288,12 @@ async def proxy_chat_stream(
 
     所有 delta.content 先作为 delta.thinking 流式发送（客户端浅色字体实时显示），
     同时缓冲内容。当检测到轮次结束时：
-    - finish_reason: "tool_calls" → 清空当前轮缓冲（推理文本不保留）
-    - finish_reason: "stop" / [DONE] → 将最后一轮缓冲作为 delta.content 发送（正式回答）
+    - finish_reason: "tool_calls" → 清空当前轮缓冲（推理轮结束，文本丢弃）
+    - finish_reason: "stop" → 将最后一轮缓冲作为 delta.content 发送（正式回答）
+    - [DONE] 不再兜底发送缓冲 — 避免整个推理过程作为正式内容
 
-    效果：推理过程实时以浅色字体显示 → 完成后推理清除 → 只保留最终结果。
+    效果：推理过程实时以浅色字体显示 → 若有明确 stop 轮次，只保留最终结果。
+    若网关不发送轮次标记，推理文本仅以浅色 thinking 样式保留，不转为正式内容。
     """
     messages = _preprocess_attachments(instance, messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream=True)
@@ -299,6 +301,7 @@ async def proxy_chat_stream(
     seen_tools: set[str] = set()
     content_buf: list[str] = []   # buffer content for current turn
     thinking_emitted = False      # any thinking sent yet?
+    seen_stop = False             # received finish_reason: "stop"
     chunk_count = 0               # total chunks received (for logging)
 
     last_exc: Exception | None = None
@@ -314,14 +317,21 @@ async def proxy_chat_stream(
 
                         # data: [DONE]
                         if line == "data: [DONE]":
-                            # Flush remaining buffer as real content
-                            if content_buf:
-                                yield _make_content_chunk("".join(content_buf))
-                                content_buf.clear()
+                            # Only emit buffer if we never got an explicit "stop"
+                            # (safety net for well-behaved gateways)
+                            if content_buf and not seen_stop:
+                                # No "stop" was received; gateway streams everything
+                                # as one blob. DON'T emit as content — let client
+                                # keep the thinking text as final display.
+                                logger.info(
+                                    "SSE [DONE] without stop: %d chunks buffered, "
+                                    "NOT emitting as content (thinking-only mode)",
+                                    len(content_buf),
+                                )
                             yield "data: [DONE]\n\n"
-                            logger.debug(
-                                "SSE stream done: %d chunks, %d tools seen",
-                                chunk_count, len(seen_tools),
+                            logger.info(
+                                "SSE stream done: %d chunks, %d tools, stop=%s",
+                                chunk_count, len(seen_tools), seen_stop,
                             )
                             return
 
@@ -344,10 +354,10 @@ async def proxy_chat_stream(
                         finish_reason = choices[0].get("finish_reason")
                         chunk_count += 1
 
-                        # Debug log (sample: first 5 + every 20th + finish)
-                        if chunk_count <= 5 or chunk_count % 20 == 0 or finish_reason:
+                        # Log chunk info (sample: first 5 + every 50th + finish)
+                        if chunk_count <= 5 or chunk_count % 50 == 0 or finish_reason:
                             delta_keys = [k for k in delta if delta[k]]
-                            logger.debug(
+                            logger.info(
                                 "SSE #%d: delta_keys=%s finish=%s",
                                 chunk_count, delta_keys, finish_reason,
                             )
@@ -378,13 +388,14 @@ async def proxy_chat_stream(
                         if finish_reason == "tool_calls":
                             # Agent turn ended → reasoning discarded, start fresh
                             content_buf.clear()
-                            logger.debug("Turn ended (tool_calls), buffer cleared")
+                            logger.info("Turn ended (tool_calls), buffer cleared")
                         elif finish_reason == "stop":
+                            seen_stop = True
                             # Final turn → emit buffered content as real content
                             if content_buf:
                                 yield _make_content_chunk("".join(content_buf))
                                 content_buf.clear()
-                                logger.debug("Final turn (stop), content emitted")
+                                logger.info("Final turn (stop), content emitted")
 
             # Stream completed successfully
             return

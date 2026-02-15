@@ -45,26 +45,27 @@ struct MessageBubble: View {
                         }
                     }
 
-                    // 思考过程（浅色斜体小字，实时累积显示）
+                    // 思考过程（浅色斜体小字）
                     if !message.thinkingText.isEmpty {
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: 4) {
-                                Image(systemName: "gear")
+                                Image(systemName: message.isStreaming ? "gear" : "checkmark.circle")
                                     .font(.caption2)
-                                Text("思考中...")
+                                Text(message.isStreaming ? "思考中..." : "处理过程")
                                     .font(.caption2)
                                     .bold()
                             }
                             .foregroundColor(.secondary.opacity(0.6))
 
-                            Text(message.thinkingText)
-                                .font(.caption)
-                                .italic()
-                                .foregroundColor(.secondary.opacity(0.7))
-                                .lineLimit(nil)
-                                .fixedSize(horizontal: false, vertical: true)
+                            ScrollView {
+                                Text(message.thinkingText)
+                                    .font(.caption)
+                                    .italic()
+                                    .foregroundColor(.secondary.opacity(0.7))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxHeight: 150)
                         }
-                        .frame(maxHeight: 120)
                     }
 
                     // 文本（如果有）
