@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct ClawBowlApp: App {
@@ -13,9 +14,8 @@ struct ClawBowlApp: App {
                     .ignoresSafeArea()
 
                 if !splashDone {
-                    // Splash 始终作为第一屏（不依赖 auth 状态）
                     SplashView {
-                        withAnimation(.easeInOut(duration: 0.5)) {
+                        withAnimation(.easeInOut(duration: 0.35)) {
                             splashDone = true
                         }
                     }
@@ -29,7 +29,7 @@ struct ClawBowlApp: App {
                         .transition(.opacity)
                 }
             }
-            .animation(.easeInOut(duration: 0.4), value: splashDone)
+            .animation(.easeInOut(duration: 0.35), value: splashDone)
             .animation(.easeInOut, value: authService.isAuthenticated)
         }
     }
@@ -37,17 +37,17 @@ struct ClawBowlApp: App {
 
 // MARK: - Splash View
 
-/// 启动欢迎屏：Logo + 随机趣味提示语，同时后台预热容器
+/// 启动欢迎屏：Logo + 随机趣味提示语
+/// 核心职责：在展示期间完成 **所有** 后台初始化，确保进入聊天界面后零卡顿。
 struct SplashView: View {
     let onFinish: () -> Void
 
-    // Logo 弹跳动画（从略小→标准尺寸，但始终可见）
     @State private var logoScale: CGFloat = 0.85
     @State private var pulseScale: CGFloat = 1.0
     @State private var dotCount = 0
     @State private var timerRef: Timer?
+    @State private var statusText = ""
 
-    /// 随机趣味提示语
     private static let tips = [
         "正在唤醒你的 AI 助手",
         "连接数字灵魂中",
@@ -69,7 +69,6 @@ struct SplashView: View {
         VStack(spacing: 24) {
             Spacer()
 
-            // Logo — 始终可见，仅做弹跳+脉冲动画
             Image(systemName: "bubble.left.and.bubble.right.fill")
                 .font(.system(size: 72))
                 .foregroundStyle(
@@ -81,14 +80,13 @@ struct SplashView: View {
                 )
                 .scaleEffect(logoScale * pulseScale)
 
-            // 标题 — 始终可见
             Text("ClawBowl")
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .foregroundColor(.white)
 
             Spacer()
 
-            // 趣味提示 — 始终可见
+            // 趣味提示 + 加载点
             Text(tip + String(repeating: ".", count: dotCount))
                 .font(.subheadline)
                 .foregroundColor(.white.opacity(0.6))
@@ -99,7 +97,7 @@ struct SplashView: View {
         }
         .onAppear {
             startAnimations()
-            startWarmup()
+            performAllStartupWork()
         }
         .onDisappear {
             timerRef?.invalidate()
@@ -107,36 +105,52 @@ struct SplashView: View {
         }
     }
 
+    // MARK: - Animations
+
     private func startAnimations() {
-        // Logo 弹入（从 0.85 → 1.0，很快）
         withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
             logoScale = 1.0
         }
-
-        // 持续脉冲呼吸动画
         withAnimation(
             .easeInOut(duration: 1.2)
             .repeatForever(autoreverses: true)
         ) {
             pulseScale = 1.06
         }
-
-        // 加载点循环动画
         timerRef = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
             dotCount = (dotCount + 1) % 4
         }
     }
 
-    private func startWarmup() {
-        // 最低显示 2.5 秒（用户能充分看到内容）
-        let minimumDisplayNanos: UInt64 = 2_500_000_000
+    // MARK: - 启动期间完成所有初始化
+
+    /// 在 Splash 显示期间，按顺序完成所有后台准备工作。
+    /// 所有任务完成 + 最低显示时间后，才调用 onFinish 进入主界面。
+    private func performAllStartupWork() {
+        let minimumDisplayNanos: UInt64 = 2_500_000_000  // 2.5 秒
 
         Task {
-            async let warmup: () = warmupContainer()
-            async let delay: () = Task.sleep(nanoseconds: minimumDisplayNanos)
+            // ① 最低显示时间（与后续任务并行计时）
+            async let minDelay: () = Task.sleep(nanoseconds: minimumDisplayNanos)
 
-            _ = try? await warmup
-            _ = try? await delay
+            // ② Token 刷新（如果已登录）→ 确保后续 API 调用不会 401
+            async let tokenWork: () = refreshTokenIfNeeded()
+
+            // ③ 预热键盘（iOS 首次键盘弹出有 ~300ms 延迟）
+            async let keyboardWork: () = preWarmKeyboard()
+
+            // 等待 token 刷新完成
+            _ = try? await tokenWork
+
+            // ④ Token 刷新后，再预热容器（需要有效 token）
+            await warmupContainer()
+
+            // ⑤ 预触发 ChatService 单例初始化
+            _ = ChatService.shared
+
+            // 等待最低显示时间和键盘预热
+            _ = try? await minDelay
+            _ = try? await keyboardWork
 
             await MainActor.run {
                 onFinish()
@@ -144,7 +158,13 @@ struct SplashView: View {
         }
     }
 
-    /// 预热后端容器
+    /// 刷新 JWT token（如果已登录且 token 可能过期）
+    private func refreshTokenIfNeeded() async {
+        guard AuthService.shared.accessToken != nil else { return }
+        try? await AuthService.shared.refreshToken()
+    }
+
+    /// 预热后端容器（调用 warmup 端点触发 Docker 容器启动）
     private func warmupContainer() async {
         guard let token = AuthService.shared.accessToken,
               let url = URL(string: "https://prometheusclothing.net/api/v2/chat/warmup") else {
@@ -157,6 +177,24 @@ struct SplashView: View {
         request.timeoutInterval = 15
 
         _ = try? await URLSession.shared.data(for: request)
+    }
+
+    /// 预热 iOS 键盘子系统
+    /// iOS 第一次弹出键盘时需要加载键盘进程（~200-400ms），
+    /// 在 splash 期间提前触发可以消除进入聊天后的首次输入卡顿。
+    private func preWarmKeyboard() async {
+        await MainActor.run {
+            let window = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first?.windows.first
+
+            let tempField = UITextField(frame: .zero)
+            tempField.autocorrectionType = .no
+            window?.addSubview(tempField)
+            tempField.becomeFirstResponder()
+            tempField.resignFirstResponder()
+            tempField.removeFromSuperview()
+        }
     }
 }
 
