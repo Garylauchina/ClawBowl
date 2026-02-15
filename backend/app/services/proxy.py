@@ -1,14 +1,26 @@
 """HTTP reverse proxy to forward chat requests to user's OpenClaw container.
 
-图片处理策略：
+图片处理策略（遵循 DESIGN.md 第 8 节）：
 - 纯文本消息：直接转发给 OpenClaw agent
-- 含图片消息：Orchestrator 先调用 ZenMux 视觉模型分析图片，
-  将图片描述+用户问题组合为纯文本，再转发给 OpenClaw
+- 含图片消息：
+  1. 提取 base64 图片 → 保存到容器工作区 media/inbound/{filename}
+  2. 向 OpenClaw 发送引用消息：[用户发送了文件: media/inbound/{filename}]
+  3. OpenClaw 容器内自行调用 image 工具分析图片
+
+流式响应：
+- proxy_chat_stream() 以 SSE 格式逐行返回 OpenClaw 的流式输出
+- 检测 tool_calls → 注入 thinking 状态行，供客户端以浅色字体展示
 """
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
 import logging
+import uuid
+from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import httpx
 
@@ -18,90 +30,108 @@ from app.models import OpenClawInstance
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "zenmux/deepseek/deepseek-chat"
-_VISION_MODEL = "z-ai/glm-4.6v-flash-free"  # 用于 ZenMux 直连
+
+# OpenClaw tool name → human-readable status (shown as "thinking" text)
+_TOOL_STATUS_MAP: dict[str, str] = {
+    "image": "正在分析图片...",
+    "web_search": "正在搜索网页...",
+    "web_fetch": "正在读取网页...",
+    "read": "正在读取文件...",
+    "write": "正在写入文件...",
+    "edit": "正在编辑文件...",
+    "exec": "正在执行命令...",
+    "process": "正在处理任务...",
+    "cron": "正在设置定时任务...",
+    "memory": "正在检索记忆...",
+}
 
 
-def _extract_image_parts(messages: list[dict]) -> tuple[list[dict], bool]:
-    """分析 messages，提取图片部分并判断是否含图片。
+def _extract_images_and_text(messages: list[dict]) -> tuple[list[dict], list[tuple[str, bytes]], bool]:
+    """分析 messages，提取最后一条用户消息中的图片和文本。
 
-    返回 (image_content_parts, has_image)，
-    其中 image_content_parts 是最后一条用户消息中的所有 content parts。
+    Returns:
+        (messages_without_last_user, [(filename, image_bytes), ...], has_image)
+        如果有图片，messages_without_last_user 不含最后一条用户消息（需要重建）。
     """
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "image_url":
-                    return content, True
-        break
-    return [], False
+    # 找到最后一条用户消息
+    last_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            last_user_idx = i
+            break
 
+    if last_user_idx < 0:
+        return messages, [], False
 
-async def _describe_image(content_parts: list) -> str:
-    """调用 ZenMux 视觉模型分析图片，返回描述文本。
+    content = messages[last_user_idx].get("content")
+    if not isinstance(content, list):
+        return messages, [], False
 
-    content_parts 是 OpenAI Vision 格式的内容数组。
-    """
-    # 组合用户文本和图片
-    user_text_parts = []
-    image_parts = []
-    for part in content_parts:
+    # 提取图片和文本
+    images: list[tuple[str, bytes]] = []
+    user_texts: list[str] = []
+
+    for part in content:
         if not isinstance(part, dict):
             continue
-        if part.get("type") == "text":
-            user_text_parts.append(part.get("text", ""))
-        elif part.get("type") == "image_url":
-            image_parts.append(part)
+        if part.get("type") == "image_url":
+            url = part.get("image_url", {}).get("url", "")
+            if url.startswith("data:"):
+                # data:image/jpeg;base64,xxxxx
+                try:
+                    header, b64data = url.split(",", 1)
+                    # Determine extension from MIME type
+                    ext = "jpg"
+                    if "png" in header:
+                        ext = "png"
+                    elif "gif" in header:
+                        ext = "gif"
+                    elif "webp" in header:
+                        ext = "webp"
+                    filename = f"{uuid.uuid4().hex[:12]}.{ext}"
+                    image_bytes = base64.b64decode(b64data)
+                    images.append((filename, image_bytes))
+                except Exception:
+                    logger.warning("Failed to decode base64 image")
+        elif part.get("type") == "text":
+            text = part.get("text", "").strip()
+            if text:
+                user_texts.append(text)
 
-    user_text = "\n".join(user_text_parts).strip()
+    if not images:
+        return messages, [], False
 
-    # 构建发给视觉模型的 prompt
-    vision_content: list[dict] = []
-    for img in image_parts:
-        vision_content.append(img)
-    vision_content.append({
-        "type": "text",
-        "text": (
-            "请详细描述这张图片的内容，包括颜色、物体、文字、场景等所有可见信息。"
-            "用中文回答，尽量详细。"
-        ),
-    })
-
-    url = f"{settings.zenmux_base_url}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {settings.zenmux_api_key}",
-    }
-    body = {
-        "model": _VISION_MODEL,
-        "messages": [{"role": "user", "content": vision_content}],
-        "stream": False,
-        "max_tokens": 1024,
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json=body, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            description = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
-            logger.info("Image described by vision model: %s chars", len(description))
-            return description
-    except Exception:
-        logger.exception("Failed to describe image via ZenMux vision model")
-        return "(图片分析失败，请重试)"
+    return messages, images, True
 
 
-def _rebuild_messages_with_description(
-    messages: list[dict], description: str
+def _save_images_to_workspace(
+    instance: OpenClawInstance, images: list[tuple[str, bytes]]
+) -> list[str]:
+    """将图片保存到容器工作区的 media/inbound/ 目录。
+
+    Returns:
+        保存后的相对路径列表，如 ['media/inbound/abc123.jpg']
+    """
+    workspace_dir = Path(instance.data_path) / "workspace"
+    inbound_dir = workspace_dir / "media" / "inbound"
+    inbound_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: list[str] = []
+    for filename, image_bytes in images:
+        file_path = inbound_dir / filename
+        file_path.write_bytes(image_bytes)
+        relative_path = f"media/inbound/{filename}"
+        saved_paths.append(relative_path)
+        logger.info("Saved image to workspace: %s (%d bytes)", relative_path, len(image_bytes))
+
+    return saved_paths
+
+
+def _rebuild_messages_with_file_refs(
+    messages: list[dict], image_paths: list[str], user_texts: list[str]
 ) -> list[dict]:
-    """将最后一条含图片的用户消息替换为：图片描述 + 用户原始问题。"""
+    """将最后一条含图片的用户消息替换为文件引用消息。"""
+    # 找到最后一条用户消息并替换
     new_messages: list[dict] = []
     replaced = False
 
@@ -125,17 +155,20 @@ def _rebuild_messages_with_description(
             continue
 
         # 提取用户文本
-        user_texts = [
-            p.get("text", "")
+        texts = [
+            p.get("text", "").strip()
             for p in content
             if isinstance(p, dict) and p.get("type") == "text"
         ]
-        user_text = "\n".join(user_texts).strip()
+        user_text = "\n".join(t for t in texts if t)
 
-        # 组合消息
-        combined = f"[用户发送了一张图片，以下是图片内容描述]\n{description}"
+        # 构建引用消息
+        file_refs = "\n".join(
+            f"[用户发送了文件: {path}]" for path in image_paths
+        )
+        combined = file_refs
         if user_text:
-            combined += f"\n\n[用户的问题]\n{user_text}"
+            combined += f"\n\n{user_text}"
 
         new_messages.append({"role": msg["role"], "content": combined})
         replaced = True
@@ -143,23 +176,50 @@ def _rebuild_messages_with_description(
     return new_messages
 
 
-async def proxy_chat_request(
+def _preprocess_images(
+    instance: OpenClawInstance, messages: list[dict]
+) -> list[dict]:
+    """Handle multimodal messages: save images to workspace, replace with file refs.
+
+    共享的图片预处理逻辑，供 proxy_chat_request 和 proxy_chat_stream 复用。
+    """
+    messages, images, has_image = _extract_images_and_text(messages)
+    if not has_image:
+        return messages
+
+    # 1. 保存图片到容器工作区
+    image_paths = _save_images_to_workspace(instance, images)
+    logger.info("Saved %d image(s) to workspace: %s", len(image_paths), image_paths)
+
+    # 2. 提取用户文本
+    user_texts: list[str] = []
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content")
+            if isinstance(content, list):
+                for p in content:
+                    if isinstance(p, dict) and p.get("type") == "text":
+                        t = p.get("text", "").strip()
+                        if t:
+                            user_texts.append(t)
+            break
+
+    # 3. 重建消息（替换图片为文件引用）
+    return _rebuild_messages_with_file_refs(messages, image_paths, user_texts)
+
+
+# ── Shared constants ──────────────────────────────────────────────────
+
+_REQ_TIMEOUT = httpx.Timeout(connect=30, read=300, write=30, pool=30)
+
+
+def _build_request_parts(
     instance: OpenClawInstance,
     messages: list[dict],
-    model: str | None = None,
-    stream: bool = False,
-) -> dict:
-    """Forward a chat completion request to the user's OpenClaw gateway.
-
-    含图片时先用视觉模型预处理，再以纯文本转发给 OpenClaw。
-    """
-    content_parts, has_image = _extract_image_parts(messages)
-
-    if has_image:
-        logger.info("Image detected, calling vision model for description")
-        description = await _describe_image(content_parts)
-        messages = _rebuild_messages_with_description(messages, description)
-
+    model: str | None,
+    stream: bool,
+) -> tuple[str, dict[str, str], dict]:
+    """Return (url, headers, body) for forwarding to OpenClaw gateway."""
     url = f"http://127.0.0.1:{instance.port}/v1/chat/completions"
     headers = {
         "Content-Type": "application/json",
@@ -170,8 +230,128 @@ async def proxy_chat_request(
         "messages": messages,
         "stream": stream,
     }
+    return url, headers, body
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(url, json=body, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+
+# ── Non-streaming request (kept for backward compat) ─────────────────
+
+async def proxy_chat_request(
+    instance: OpenClawInstance,
+    messages: list[dict],
+    model: str | None = None,
+    stream: bool = False,
+) -> dict:
+    """Forward a chat completion request to the user's OpenClaw gateway (non-streaming)."""
+    messages = _preprocess_images(instance, messages)
+    url, headers, body = _build_request_parts(instance, messages, model, stream)
+
+    # Retry once on connection errors (gateway may still be warming up)
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=_REQ_TIMEOUT) as client:
+                resp = await client.post(url, json=body, headers=headers)
+                resp.raise_for_status()
+                return resp.json()
+        except (httpx.ConnectError, httpx.ReadError) as exc:
+            last_exc = exc
+            if attempt == 0:
+                logger.warning("Gateway connection failed, retrying in 5s: %s", exc)
+                await asyncio.sleep(5)
+    raise last_exc  # type: ignore[misc]
+
+
+# ── Streaming request ─────────────────────────────────────────────────
+
+def _make_thinking_chunk(message: str) -> str:
+    """Build an SSE line with a 'thinking' delta for tool status display."""
+    payload = json.dumps(
+        {"choices": [{"delta": {"thinking": message}}]},
+        ensure_ascii=False,
+    )
+    return f"data: {payload}\n\n"
+
+
+async def proxy_chat_stream(
+    instance: OpenClawInstance,
+    messages: list[dict],
+    model: str | None = None,
+) -> AsyncGenerator[str, None]:
+    """Forward a chat completion request and yield SSE lines in real time.
+
+    - delta.content 行原样透传
+    - delta.tool_calls 行转换为 delta.thinking 状态行
+    - data: [DONE] 最终透传
+    """
+    messages = _preprocess_images(instance, messages)
+    url, headers, body = _build_request_parts(instance, messages, model, stream=True)
+
+    seen_tools: set[str] = set()  # avoid duplicate status for same tool call
+
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=_REQ_TIMEOUT) as client:
+                async with client.stream("POST", url, json=body, headers=headers) as resp:
+                    resp.raise_for_status()
+                    async for raw_line in resp.aiter_lines():
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+
+                        # data: [DONE]
+                        if line == "data: [DONE]":
+                            yield "data: [DONE]\n\n"
+                            return
+
+                        if not line.startswith("data: "):
+                            continue
+
+                        # Parse the JSON payload
+                        try:
+                            chunk = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            # Forward unparseable lines as-is
+                            yield line + "\n\n"
+                            continue
+
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            yield line + "\n\n"
+                            continue
+
+                        delta = choices[0].get("delta", {})
+
+                        # ── Tool calls → inject thinking status ──
+                        tool_calls = delta.get("tool_calls")
+                        if tool_calls:
+                            for tc in tool_calls:
+                                fn = tc.get("function", {})
+                                tool_name = fn.get("name", "")
+                                if tool_name and tool_name not in seen_tools:
+                                    seen_tools.add(tool_name)
+                                    status = _TOOL_STATUS_MAP.get(
+                                        tool_name, f"正在执行 {tool_name}..."
+                                    )
+                                    yield _make_thinking_chunk(status)
+                            # Don't forward raw tool_calls to client
+                            continue
+
+                        # ── Content text → forward as-is ──
+                        if delta.get("content"):
+                            yield line + "\n\n"
+                            continue
+
+                        # ── Other deltas (role, finish_reason, etc.) → forward ──
+                        yield line + "\n\n"
+
+            # If we reach here the stream completed successfully
+            return
+
+        except (httpx.ConnectError, httpx.ReadError) as exc:
+            last_exc = exc
+            if attempt == 0:
+                logger.warning("Gateway stream connection failed, retrying in 5s: %s", exc)
+                await asyncio.sleep(5)
+
+    raise last_exc  # type: ignore[misc]

@@ -27,13 +27,6 @@ struct ChatView: View {
                                         removal: .opacity
                                     ))
                             }
-
-                            // 思考中动画
-                            if isLoading {
-                                ThinkingIndicator()
-                                    .id("thinking")
-                                    .transition(.opacity)
-                            }
                         }
                         .padding(.vertical, 8)
                     }
@@ -41,7 +34,8 @@ struct ChatView: View {
                     .onChange(of: messages.count) { _ in
                         scrollToBottom(proxy: proxy)
                     }
-                    .onChange(of: isLoading) { _ in
+                    .onChange(of: messages) { _ in
+                        // Scroll on every streaming update
                         scrollToBottom(proxy: proxy)
                     }
                 }
@@ -107,16 +101,15 @@ struct ChatView: View {
         selectedImage = nil
         isLoading = true
 
-        // 异步：先压缩图片，再显示消息和调用 API
         Task {
             do {
-                // 压缩图片（同一份数据用于显示和 API）
+                // 压缩图片
                 var compressedData: Data?
                 if let img = image {
                     compressedData = await ChatService.shared.compressImage(img)
                 }
 
-                // 添加用户消息（用压缩后的图片）
+                // 添加用户消息
                 let displayText = content.isEmpty && image != nil ? "[图片]" : content
                 let userMessage = Message(
                     role: .user,
@@ -129,30 +122,75 @@ struct ChatView: View {
                     }
                 }
 
-                let historyMessages = Array(messages.dropLast())
-                let reply = try await ChatService.shared.sendMessage(
+                // 创建流式占位 assistant 消息
+                let placeholderMessage = Message(
+                    role: .assistant,
+                    content: "",
+                    isStreaming: true
+                )
+                let placeholderID = placeholderMessage.id
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        messages.append(placeholderMessage)
+                    }
+                }
+
+                // 获取历史（不含占位消息）
+                let historyMessages = Array(messages.dropLast(2))
+
+                // 发起 SSE 流式请求
+                let stream = try await ChatService.shared.sendMessageStream(
                     content,
                     imageData: compressedData,
                     history: historyMessages
                 )
-                let assistantMessage = Message(role: .assistant, content: reply)
-                await MainActor.run {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        messages.append(assistantMessage)
-                        isLoading = false
+
+                // 逐事件更新占位消息
+                for try await event in stream {
+                    await MainActor.run {
+                        guard let idx = messages.firstIndex(where: { $0.id == placeholderID }) else { return }
+                        switch event {
+                        case .thinking(let status):
+                            messages[idx].thinkingText = status
+                        case .content(let text):
+                            messages[idx].content += text
+                        case .done:
+                            messages[idx].isStreaming = false
+                        }
                     }
                 }
-            } catch {
-                let errorMessage = Message(
-                    role: .assistant,
-                    content: "抱歉，出了点问题：\(error.localizedDescription)。请稍后重试。",
-                    status: .error
-                )
+
+                // 流结束
                 await MainActor.run {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        messages.append(errorMessage)
-                        isLoading = false
+                    if let idx = messages.firstIndex(where: { $0.id == placeholderID }) {
+                        messages[idx].isStreaming = false
+                        // 如果内容为空说明 OpenClaw 没返回有效内容
+                        if messages[idx].content.isEmpty && messages[idx].thinkingText.isEmpty {
+                            messages[idx].content = "AI 未返回内容，请重试。"
+                            messages[idx].status = .error
+                        }
                     }
+                    isLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    // 如果已有占位消息，更新为错误；否则新增
+                    if let lastIdx = messages.indices.last,
+                       messages[lastIdx].role == .assistant && messages[lastIdx].isStreaming {
+                        messages[lastIdx].content = "抱歉，出了点问题：\(error.localizedDescription)。请稍后重试。"
+                        messages[lastIdx].status = .error
+                        messages[lastIdx].isStreaming = false
+                    } else {
+                        let errorMessage = Message(
+                            role: .assistant,
+                            content: "抱歉，出了点问题：\(error.localizedDescription)。请稍后重试。",
+                            status: .error
+                        )
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            messages.append(errorMessage)
+                        }
+                    }
+                    isLoading = false
                 }
             }
         }
@@ -173,58 +211,11 @@ struct ChatView: View {
     private func scrollToBottom(proxy: ScrollViewProxy) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             withAnimation(.easeOut(duration: 0.2)) {
-                if isLoading {
-                    proxy.scrollTo("thinking", anchor: .bottom)
-                } else if let lastId = messages.last?.id {
+                if let lastId = messages.last?.id {
                     proxy.scrollTo(lastId, anchor: .bottom)
                 }
             }
         }
-    }
-}
-
-/// "正在思考" 动画指示器
-struct ThinkingIndicator: View {
-    @State private var animating = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            // AI 头像
-            Text("AI")
-                .font(.caption.bold())
-                .foregroundColor(.white)
-                .frame(width: 36, height: 36)
-                .background(
-                    LinearGradient(colors: [.purple, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing)
-                )
-                .clipShape(Circle())
-
-            // 思考气泡
-            HStack(spacing: 6) {
-                ForEach(0..<3, id: \.self) { index in
-                    Circle()
-                        .fill(Color.secondary.opacity(0.5))
-                        .frame(width: 8, height: 8)
-                        .scaleEffect(animating ? 1.2 : 0.7)
-                        .opacity(animating ? 1 : 0.4)
-                        .animation(
-                            .easeInOut(duration: 0.6)
-                                .repeatForever()
-                                .delay(Double(index) * 0.2),
-                            value: animating
-                        )
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .background(Color(.systemGray6))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 3)
-        .onAppear { animating = true }
     }
 }
 

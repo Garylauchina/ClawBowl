@@ -1,6 +1,16 @@
 import Foundation
 import UIKit
 
+/// SSE 流式事件类型
+enum StreamEvent {
+    /// 工具执行状态（浅色字体显示）
+    case thinking(String)
+    /// 正常文本内容增量
+    case content(String)
+    /// 流结束
+    case done
+}
+
 /// AI 聊天 API 通信服务 – 通过 Orchestrator 代理到用户专属的 OpenClaw 实例
 actor ChatService {
     static let shared = ChatService()
@@ -14,29 +24,20 @@ actor ChatService {
 
     private init() {}
 
-    /// 发送消息并获取 AI 回复（支持多模态）
-    /// - Parameters:
-    ///   - content: 用户消息文本
-    ///   - imageData: 可选的图片数据（已压缩的 JPEG）
-    ///   - history: 历史消息（用于上下文）
-    /// - Returns: AI 回复文本
-    func sendMessage(_ content: String, imageData: Data? = nil, history: [Message]) async throws -> String {
-        guard let token = await AuthService.shared.accessToken else {
-            throw ChatError.notAuthenticated
-        }
+    // MARK: - Build request messages (shared by both modes)
 
-        guard let url = URL(string: baseURL) else {
-            throw ChatError.invalidURL
-        }
-
-        // 构建消息列表（最近 10 轮对话 = 20 条消息）
-        // 历史消息中的图片不发送 base64（避免请求体过大），只用文本标记
+    /// 构建 API 请求消息列表
+    private func buildRequestMessages(
+        content: String,
+        imageData: Data?,
+        history: [Message]
+    ) -> [ChatCompletionRequest.RequestMessage] {
         var requestMessages: [ChatCompletionRequest.RequestMessage] = []
 
+        // 历史消息（最近 20 条），图片用文本标记代替
         let recentHistory = history.suffix(20)
         for msg in recentHistory {
             if msg.imageData != nil {
-                // 历史消息中曾有图片，用文本标记代替 base64
                 let text = msg.content.isEmpty ? "[图片]" : "\(msg.content)\n[图片]"
                 requestMessages.append(.init(role: msg.role.rawValue, content: .text(text)))
             } else {
@@ -57,43 +58,67 @@ actor ChatService {
             requestMessages.append(.init(role: "user", content: .text(content)))
         }
 
-        let requestBody = ChatRequest(
-            messages: requestMessages,
-            stream: false
-        )
+        return requestMessages
+    }
+
+    /// 构建 URLRequest
+    private func buildURLRequest(
+        messages: [ChatCompletionRequest.RequestMessage],
+        stream: Bool,
+        token: String
+    ) throws -> URLRequest {
+        guard let url = URL(string: baseURL) else {
+            throw ChatError.invalidURL
+        }
+
+        let requestBody = ChatRequest(messages: messages, stream: stream)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 120
+        request.timeoutInterval = 300  // 5 min for complex agent tasks
 
         let encoder = JSONEncoder()
         request.httpBody = try encoder.encode(requestBody)
+        return request
+    }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-
+    /// 检查 HTTP 响应状态码
+    private func validateHTTPResponse(_ response: URLResponse) throws {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ChatError.invalidResponse
         }
-
         guard httpResponse.statusCode == 200 else {
             switch httpResponse.statusCode {
             case 401:
-                try? await AuthService.shared.refreshToken()
+                Task { try? await AuthService.shared.refreshToken() }
                 throw ChatError.notAuthenticated
             case 429:
                 throw ChatError.rateLimited
             case 500:
                 throw ChatError.serverError
-            case 502:
-                throw ChatError.serviceUnavailable
-            case 503:
+            case 502, 503:
                 throw ChatError.serviceUnavailable
             default:
                 throw ChatError.httpError(httpResponse.statusCode)
             }
         }
+    }
+
+    // MARK: - Non-streaming (legacy, kept as fallback)
+
+    /// 发送消息并获取 AI 回复（非流式，一次性返回）
+    func sendMessage(_ content: String, imageData: Data? = nil, history: [Message]) async throws -> String {
+        guard let token = await AuthService.shared.accessToken else {
+            throw ChatError.notAuthenticated
+        }
+
+        let requestMessages = buildRequestMessages(content: content, imageData: imageData, history: history)
+        let request = try buildURLRequest(messages: requestMessages, stream: false, token: token)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response)
 
         let decoder = JSONDecoder()
         let completionResponse = try decoder.decode(ChatCompletionResponse.self, from: data)
@@ -101,9 +126,79 @@ actor ChatService {
         guard let replyContent = completionResponse.choices?.first?.message?.content else {
             throw ChatError.emptyResponse
         }
-
         return replyContent
     }
+
+    // MARK: - Streaming (SSE)
+
+    /// 发送消息并以 SSE 流式接收 AI 回复
+    ///
+    /// 返回一个 AsyncThrowingStream，调用方逐个消费 StreamEvent：
+    /// - `.thinking("正在分析图片...")` → 工具执行状态
+    /// - `.content("文字...")` → 正常文本增量
+    /// - `.done` → 流结束
+    func sendMessageStream(
+        _ content: String,
+        imageData: Data? = nil,
+        history: [Message]
+    ) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        guard let token = await AuthService.shared.accessToken else {
+            throw ChatError.notAuthenticated
+        }
+
+        let requestMessages = buildRequestMessages(content: content, imageData: imageData, history: history)
+        let request = try buildURLRequest(messages: requestMessages, stream: true, token: token)
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        try validateHTTPResponse(response)
+
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await line in bytes.lines {
+                        // SSE format: "data: {...}" or "data: [DONE]"
+                        guard line.hasPrefix("data: ") else { continue }
+                        let payload = String(line.dropFirst(6))
+
+                        if payload == "[DONE]" {
+                            continuation.yield(.done)
+                            continuation.finish()
+                            return
+                        }
+
+                        // Parse JSON chunk
+                        guard let data = payload.data(using: .utf8) else { continue }
+                        guard let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data) else {
+                            continue
+                        }
+
+                        guard let delta = chunk.choices?.first?.delta else { continue }
+
+                        // Thinking status (tool execution)
+                        if let thinking = delta.thinking, !thinking.isEmpty {
+                            continuation.yield(.thinking(thinking))
+                        }
+
+                        // Content text
+                        if let text = delta.content, !text.isEmpty {
+                            continuation.yield(.content(text))
+                        }
+                    }
+                    // If stream ends without [DONE], still finish
+                    continuation.yield(.done)
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
+    // MARK: - Image compression
 
     /// 压缩图片：缩放到最大尺寸并转为 JPEG
     func compressImage(_ image: UIImage) -> Data? {
@@ -122,6 +217,8 @@ actor ChatService {
         }
         return resized.jpegData(compressionQuality: jpegQuality)
     }
+
+    // MARK: - Session management
 
     /// 重置会话（请求后端销毁并重建 OpenClaw 实例）
     func resetSession() async {

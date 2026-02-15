@@ -196,8 +196,8 @@ class InstanceManager:
         instance.state = "running"
         await db.commit()
 
-        # Wait for gateway to be ready (OpenClaw needs ~30-45s to start)
-        await self._wait_for_ready(instance, timeout=60)
+        # Wait for gateway to be ready (OpenClaw needs ~60-90s to start on low-spec VPS)
+        await self._wait_for_ready(instance, timeout=120)
 
         logger.info("Created instance %s on port %d for user %s", container_name, port, user.id)
         return instance

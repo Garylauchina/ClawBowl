@@ -3,6 +3,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
@@ -10,7 +11,7 @@ from app.database import get_db
 from app.models import User
 from app.schemas import ChatRequest
 from app.services.instance_manager import instance_manager
-from app.services.proxy import proxy_chat_request
+from app.services.proxy import proxy_chat_request, proxy_chat_stream
 
 logger = logging.getLogger("clawbowl.chat")
 
@@ -32,20 +33,39 @@ async def chat(
     has_image = any(
         isinstance(m.get("content"), list) for m in messages
     )
-    logger.info("Chat request: user=%s, msgs=%d, has_image=%s", user.id, len(messages), has_image)
+    logger.info(
+        "Chat request: user=%s, msgs=%d, has_image=%s, stream=%s",
+        user.id, len(messages), has_image, body.stream,
+    )
 
     try:
-        result = await proxy_chat_request(
-            instance=instance,
-            messages=messages,
-            model=body.model,
-            stream=body.stream,
-        )
+        if body.stream:
+            # SSE streaming — return chunks as they arrive from OpenClaw
+            generator = proxy_chat_stream(
+                instance=instance,
+                messages=messages,
+                model=body.model,
+            )
+            return StreamingResponse(
+                generator,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",  # tell Nginx not to buffer
+                },
+            )
+        else:
+            # Non-streaming — wait for full response
+            result = await proxy_chat_request(
+                instance=instance,
+                messages=messages,
+                model=body.model,
+                stream=False,
+            )
+            return result
     except Exception as exc:
         logger.error("Proxy error for user %s: %s", user.id, exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"OpenClaw instance error: {exc}",
         )
-
-    return result

@@ -23,11 +23,28 @@ struct MessageBubble: View {
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
 
+                    // 思考状态（浅色斜体小字，类似 Claude 的思考过程）
+                    if !message.thinkingText.isEmpty {
+                        HStack(spacing: 4) {
+                            Image(systemName: "gear")
+                                .font(.caption2)
+                            Text(message.thinkingText)
+                                .font(.caption)
+                                .italic()
+                        }
+                        .foregroundColor(.secondary.opacity(0.7))
+                    }
+
                     // 文本（如果有）
                     if !message.content.isEmpty {
                         Text(message.content)
                             .font(.body)
                             .foregroundColor(message.role == .user ? .white : .primary)
+                    }
+
+                    // 流式接收中：闪烁光标
+                    if message.isStreaming && message.content.isEmpty && message.thinkingText.isEmpty {
+                        StreamingCursor()
                     }
                 }
                 .padding(.horizontal, 14)
@@ -58,7 +75,10 @@ struct MessageBubble: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
 
-                    if message.status == .sending {
+                    if message.isStreaming {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                    } else if message.status == .sending {
                         ProgressView()
                             .scaleEffect(0.6)
                     } else if message.status == .error {
@@ -139,11 +159,32 @@ struct BubbleShape: Shape {
     }
 }
 
+/// 流式接收中的闪烁光标
+struct StreamingCursor: View {
+    @State private var visible = true
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 1)
+            .fill(Color.secondary.opacity(visible ? 0.6 : 0))
+            .frame(width: 2, height: 16)
+            .animation(
+                .easeInOut(duration: 0.5).repeatForever(autoreverses: true),
+                value: visible
+            )
+            .onAppear { visible.toggle() }
+    }
+}
+
 #Preview {
     VStack {
         MessageBubble(message: Message(role: .user, content: "你好！"))
         MessageBubble(message: Message(role: .assistant, content: "你好！有什么可以帮你的吗？"))
-        MessageBubble(message: Message(role: .user, content: "这是一条带图片的消息"))
+        MessageBubble(message: Message(
+            role: .assistant,
+            content: "",
+            thinkingText: "正在分析图片...",
+            isStreaming: true
+        ))
     }
     .padding()
 }
