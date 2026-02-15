@@ -404,19 +404,26 @@ struct DocumentPicker: UIViewControllerRepresentable {
 // MARK: - Speech Recognition Manager
 
 /// 语音识别管理器：使用 iOS Speech 框架进行本地实时转写
+/// 所有重量级对象（SFSpeechRecognizer、AVAudioEngine）延迟到首次使用时创建，避免阻塞启动。
 class SpeechRecognitionManager: ObservableObject {
     @Published var isRecording = false
     @Published var transcribedText = ""
     @Published var showPermissionAlert = false
     @Published var permissionMessage = ""
 
+    // 延迟初始化：只在用户点击麦克风时才创建
     private var speechRecognizer: SFSpeechRecognizer?
+    private var audioEngine: AVAudioEngine?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private let audioEngine = AVAudioEngine()
+    private var isInitialized = false
 
-    init() {
+    /// 延迟初始化语音引擎（在后台线程执行，避免阻塞 UI）
+    private func ensureInitialized() {
+        guard !isInitialized else { return }
         speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
+        audioEngine = AVAudioEngine()
+        isInitialized = true
     }
 
     func startRecording() {
@@ -452,6 +459,9 @@ class SpeechRecognitionManager: ObservableObject {
     }
 
     private func beginRecording() {
+        // 延迟初始化重量级对象
+        ensureInitialized()
+
         // 如果有正在进行的任务，先停止
         if recognitionTask != nil {
             recognitionTask?.cancel()
@@ -463,6 +473,8 @@ class SpeechRecognitionManager: ObservableObject {
             showPermissionAlert = true
             return
         }
+
+        guard let audioEngine = audioEngine else { return }
 
         // 配置音频会话
         let audioSession = AVAudioSession.sharedInstance()
@@ -480,10 +492,8 @@ class SpeechRecognitionManager: ObservableObject {
         recognitionRequest.shouldReportPartialResults = true
 
         // 如果设备支持，使用离线识别
-        if #available(iOS 13, *) {
-            if speechRecognizer.supportsOnDeviceRecognition {
-                recognitionRequest.requiresOnDeviceRecognition = true
-            }
+        if speechRecognizer.supportsOnDeviceRecognition {
+            recognitionRequest.requiresOnDeviceRecognition = true
         }
 
         recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
@@ -506,8 +516,8 @@ class SpeechRecognitionManager: ObservableObject {
         // 配置音频输入
         let inputNode = audioEngine.inputNode
         let recordingFormat = inputNode.outputFormat(forBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
-            self.recognitionRequest?.append(buffer)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
+            self?.recognitionRequest?.append(buffer)
         }
 
         audioEngine.prepare()
@@ -531,8 +541,8 @@ class SpeechRecognitionManager: ObservableObject {
     }
 
     private func stopAudioEngine() {
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine?.inputNode.removeTap(onBus: 0)
         recognitionRequest = nil
         recognitionTask = nil
     }
