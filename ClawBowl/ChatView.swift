@@ -53,6 +53,14 @@ struct ChatView: View {
                             .padding(.vertical, 8)
                         }
                         .scrollDismissesKeyboard(.interactively)
+                        .onAppear {
+                            // 启动时自动滚动到最新消息（聊天 app 标准行为）
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                if let lastID = messages.last?.id {
+                                    proxy.scrollTo(lastID, anchor: .bottom)
+                                }
+                            }
+                        }
                         .onChange(of: messages.count) { _ in
                             scrollToBottom(proxy: proxy, animated: true)
                         }
