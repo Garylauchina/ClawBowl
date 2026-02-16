@@ -1,10 +1,86 @@
 import SwiftUI
+import UIKit
+
+// MARK: - UIKit 桥接：可靠检测滚动位置 + 惯性滚动时也能滚到底部
+
+/// 通过 KVO 监听 UIScrollView.contentOffset，解决 SwiftUI 三个问题：
+/// 1. 惯性滚动时按钮无响应 → UIKit 直接操作 setContentOffset
+/// 2. scrollTo 透明锚点导致白屏 → UIKit 计算正确的 contentOffset
+/// 3. 启动时检测不生效 → KVO .initial 选项立即触发
+struct ScrollPositionHelper: UIViewRepresentable {
+    @Binding var isAtBottom: Bool
+    let scrollToBottomTrigger: UInt
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView(frame: .zero)
+        v.backgroundColor = .clear
+        v.isUserInteractionEnabled = false
+        return v
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        let coord = context.coordinator
+        // 找到父级 UIScrollView（只做一次）
+        if coord.scrollView == nil {
+            DispatchQueue.main.async { coord.attach(from: uiView) }
+        }
+        // 响应"滚到底部"触发
+        if coord.lastTrigger != scrollToBottomTrigger {
+            coord.lastTrigger = scrollToBottomTrigger
+            DispatchQueue.main.async { coord.scrollToBottom() }
+        }
+    }
+
+    class Coordinator {
+        let parent: ScrollPositionHelper
+        weak var scrollView: UIScrollView?
+        var observation: NSKeyValueObservation?
+        var lastAtBottom = true
+        var lastTrigger: UInt = 0
+
+        init(parent: ScrollPositionHelper) { self.parent = parent }
+
+        func attach(from view: UIView) {
+            var cur: UIView? = view
+            while let p = cur?.superview {
+                if let sv = p as? UIScrollView {
+                    scrollView = sv
+                    observation = sv.observe(\.contentOffset, options: [.new, .initial]) { [weak self] sv, _ in
+                        self?.checkPosition(sv)
+                    }
+                    break
+                }
+                cur = p
+            }
+        }
+
+        private func checkPosition(_ sv: UIScrollView) {
+            guard sv.contentSize.height > 0, sv.frame.height > 0 else { return }
+            let atBottom = sv.contentOffset.y + sv.frame.height >= sv.contentSize.height - 60
+            guard atBottom != lastAtBottom else { return }
+            lastAtBottom = atBottom
+            DispatchQueue.main.async {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    self.parent.isAtBottom = atBottom
+                }
+            }
+        }
+
+        func scrollToBottom() {
+            guard let sv = scrollView, sv.contentSize.height > sv.frame.height else { return }
+            sv.setContentOffset(sv.contentOffset, animated: false)
+            let bottom = sv.contentSize.height - sv.frame.height + sv.adjustedContentInset.bottom
+            sv.setContentOffset(CGPoint(x: 0, y: max(bottom, 0)), animated: true)
+        }
+    }
+}
 
 /// 聊天主视图
 struct ChatView: View {
     @Environment(\.authService) private var authService
     @State private var messages: [Message] = {
-        // 启动时恢复上次的聊天记录；没有则显示默认问候
         if let saved = MessageStore.load() {
             return saved
         }
@@ -17,13 +93,13 @@ struct ChatView: View {
     @State private var showLogoutAlert = false
     /// 轻量滚动触发器：streaming 时递增此值代替对整个 messages 的全量比较
     @State private var scrollTrigger: UInt = 0
-    /// 用户是否不在对话底部（控制浮动按钮显示）
-    @State private var showScrollToBottom = false
+    /// UIKit KVO 检测：当前是否在底部
+    @State private var isAtBottom = true
+    /// 触发 UIKit 滚到底部（递增即触发）
+    @State private var scrollToBottomTrigger: UInt = 0
     /// Ready Gate：等待占位气泡渲染完成后再发请求
     @State private var readyContinuation: CheckedContinuation<Void, Never>?
     @State private var pendingReadyID: UUID?
-    /// 存储 ScrollViewProxy 供外层按钮使用
-    @State private var scrollProxy: ScrollViewProxy?
 
     var body: some View {
         NavigationStack {
@@ -42,32 +118,18 @@ struct ChatView: View {
                                             readyContinuation?.resume()
                                             readyContinuation = nil
                                         }
-                                        // 最后一条消息可见 → 用户在底部，隐藏按钮
-                                        if message.id == messages.last?.id {
-                                            withAnimation(.easeInOut(duration: 0.2)) {
-                                                showScrollToBottom = false
-                                            }
-                                        }
-                                    }
-                                    .onDisappear {
-                                        // 最后一条消息不可见 → 用户不在底部，显示按钮
-                                        if message.id == messages.last?.id {
-                                            withAnimation(.easeInOut(duration: 0.2)) {
-                                                showScrollToBottom = true
-                                            }
-                                        }
                                     }
                             }
-                            // 底部锚点（仅用于 scrollTo 目标）
-                            Color.clear
-                                .frame(height: 1)
-                                .id("bottom-anchor")
                         }
                         .padding(.vertical, 8)
+                        // UIKit 桥接：检测位置 + 处理滚到底部
+                        .background(ScrollPositionHelper(
+                            isAtBottom: $isAtBottom,
+                            scrollToBottomTrigger: scrollToBottomTrigger
+                        ))
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .onAppear {
-                        scrollProxy = proxy
                         // 启动时自动滚动到最新消息
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                             if let lastID = messages.last?.id {
@@ -76,19 +138,17 @@ struct ChatView: View {
                         }
                     }
                     .onChange(of: messages.count) { _ in
-                        scrollToBottom(proxy: proxy, animated: true)
+                        scrollToBottom(proxy: proxy)
                     }
                     .onChange(of: scrollTrigger) { _ in
-                        scrollToBottom(proxy: proxy, animated: false)
+                        scrollToBottom(proxy: proxy)
                     }
                 }
-                // 浮动"回到底部"按钮（在 ScrollViewReader 外层，不受 UIScrollView 手势拦截）
+                // 浮动"回到底部"按钮（完全在 ScrollView 外层）
                 .overlay(alignment: .bottomTrailing) {
-                    if showScrollToBottom {
+                    if !isAtBottom {
                         Button {
-                            if let proxy = scrollProxy {
-                                scrollToBottom(proxy: proxy, animated: true)
-                            }
+                            scrollToBottomTrigger &+= 1
                         } label: {
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 14, weight: .bold))
@@ -98,11 +158,10 @@ struct ChatView: View {
                                 .clipShape(Circle())
                                 .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
                         }
-                        .contentShape(Circle())
                         .padding(.trailing, 16)
                         .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .scale(scale: 0.8)))
-                        .animation(.easeInOut(duration: 0.2), value: showScrollToBottom)
+                        .animation(.easeInOut(duration: 0.2), value: isAtBottom)
                     }
                 }
 
@@ -356,18 +415,11 @@ struct ChatView: View {
         return "服务暂时不可用，请稍后重试"
     }
 
-    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool = true) {
-        if animated {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo("bottom-anchor", anchor: .bottom)
-                }
-            }
-        } else {
-            // 流式期间：无动画，直接跳转，避免动画队列堆积
-            DispatchQueue.main.async {
-                proxy.scrollTo("bottom-anchor", anchor: .bottom)
-            }
+    /// 流式期间自动跟随最新消息（无动画，避免队列堆积）
+    private func scrollToBottom(proxy: ScrollViewProxy) {
+        guard let lastID = messages.last?.id else { return }
+        DispatchQueue.main.async {
+            proxy.scrollTo(lastID, anchor: .bottom)
         }
     }
 }
