@@ -17,33 +17,68 @@ struct ChatView: View {
     @State private var showLogoutAlert = false
     /// 轻量滚动触发器：streaming 时递增此值代替对整个 messages 的全量比较
     @State private var scrollTrigger: UInt = 0
+    /// 用户是否不在对话底部（控制浮动按钮显示）
+    @State private var showScrollToBottom = false
+    /// Ready Gate：等待占位气泡渲染完成后再发请求
+    @State private var readyContinuation: CheckedContinuation<Void, Never>?
+    @State private var pendingReadyID: UUID?
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 // 消息列表
                 ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(messages) { message in
-                                MessageBubble(message: message)
-                                    .id(message.id)
-                                    .transition(.asymmetric(
-                                        insertion: .move(edge: .bottom).combined(with: .opacity),
-                                        removal: .opacity
-                                    ))
+                    ZStack(alignment: .bottomTrailing) {
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(messages) { message in
+                                    MessageBubble(message: message)
+                                        .id(message.id)
+                                        .onAppear {
+                                            // Ready Gate：占位气泡渲染完成，通知 sendMessage 可以发请求了
+                                            if message.id == pendingReadyID {
+                                                pendingReadyID = nil
+                                                readyContinuation?.resume()
+                                                readyContinuation = nil
+                                            }
+                                        }
+                                }
+                                // 底部锚点：用 onAppear/onDisappear 检测是否在底部
+                                Color.clear
+                                    .frame(height: 1)
+                                    .id("bottom-anchor")
+                                    .onAppear { withAnimation(.easeInOut(duration: 0.2)) { showScrollToBottom = false } }
+                                    .onDisappear { withAnimation(.easeInOut(duration: 0.2)) { showScrollToBottom = true } }
                             }
+                            .padding(.vertical, 8)
                         }
-                        .padding(.vertical, 8)
-                    }
-                    .scrollDismissesKeyboard(.interactively)
-                    .onChange(of: messages.count) { _ in
-                        // 新消息加入时滚动到底部
-                        scrollToBottom(proxy: proxy)
-                    }
-                    .onChange(of: scrollTrigger) { _ in
-                        // streaming 更新时滚动到底部（轻量计数器代替全量比较）
-                        scrollToBottom(proxy: proxy)
+                        .scrollDismissesKeyboard(.interactively)
+                        .onChange(of: messages.count) { _ in
+                            scrollToBottom(proxy: proxy, animated: true)
+                        }
+                        .onChange(of: scrollTrigger) { _ in
+                            // streaming 期间不加动画，避免动画队列堆积
+                            scrollToBottom(proxy: proxy, animated: false)
+                        }
+
+                        // 浮动"回到底部"按钮
+                        if showScrollToBottom {
+                            Button {
+                                scrollToBottom(proxy: proxy, animated: true)
+                            } label: {
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .frame(width: 36, height: 36)
+                                    .background(Color.accentColor.opacity(0.85))
+                                    .clipShape(Circle())
+                                    .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+                            }
+                            .padding(.trailing, 16)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                            .animation(.easeInOut(duration: 0.2), value: showScrollToBottom)
+                        }
                     }
                 }
 
@@ -140,11 +175,34 @@ struct ChatView: View {
                     isStreaming: true
                 )
                 let placeholderID = placeholderMessage.id
+
+                // Ready Gate：先设置等待目标，再 append，确保 onAppear 能匹配
                 await MainActor.run {
+                    pendingReadyID = placeholderID
                     withAnimation(.easeInOut(duration: 0.2)) {
                         messages.append(placeholderMessage)
                     }
                 }
+
+                // 等待占位气泡渲染完成（onAppear 会 resume）
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    if pendingReadyID == nil {
+                        // onAppear 已经在 append 的同步周期内触发了
+                        cont.resume()
+                    } else {
+                        readyContinuation = cont
+                        // 安全超时：500ms 后强制放行，防止极端情况死锁
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 500_000_000)
+                            guard readyContinuation != nil else { return }
+                            readyContinuation?.resume()
+                            readyContinuation = nil
+                            pendingReadyID = nil
+                        }
+                    }
+                }
+
+                // ── UI Ready，开始发请求 ──
 
                 // 获取历史（不含占位消息）
                 let historyMessages = Array(messages.dropLast(2))
@@ -162,7 +220,6 @@ struct ChatView: View {
                         guard let idx = messages.firstIndex(where: { $0.id == placeholderID }) else { return }
                         switch event {
                         case .thinking(let status):
-                            // 追加模式：逐行累积显示推理过程
                             messages[idx].thinkingText += status
                             // 截断超长文本防止 UI 卡顿（保留最近 800 字符）
                             if messages[idx].thinkingText.count > 1000 {
@@ -171,7 +228,6 @@ struct ChatView: View {
                                 messages[idx].thinkingText = "…" + String(text[start...])
                             }
                         case .content(let text):
-                            // 收到正式内容 → 清除推理过程，显示最终结果
                             if !messages[idx].thinkingText.isEmpty {
                                 messages[idx].thinkingText = ""
                                 messages[idx].content = text  // 替换（首次）
@@ -181,8 +237,6 @@ struct ChatView: View {
                             scrollTrigger &+= 1
                         case .done:
                             messages[idx].isStreaming = false
-                            // 如果有正式 content → 清除 thinking
-                            // 如果没有 content 但有 thinking → 保留 thinking 作为最终显示
                             if !messages[idx].content.isEmpty {
                                 messages[idx].thinkingText = ""
                             }
@@ -278,12 +332,17 @@ struct ChatView: View {
         return "服务暂时不可用，请稍后重试"
     }
 
-    private func scrollToBottom(proxy: ScrollViewProxy) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            withAnimation(.easeOut(duration: 0.2)) {
-                if let lastId = messages.last?.id {
-                    proxy.scrollTo(lastId, anchor: .bottom)
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool = true) {
+        if animated {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo("bottom-anchor", anchor: .bottom)
                 }
+            }
+        } else {
+            // 流式期间：无动画，直接跳转，避免动画队列堆积
+            DispatchQueue.main.async {
+                proxy.scrollTo("bottom-anchor", anchor: .bottom)
             }
         }
     }

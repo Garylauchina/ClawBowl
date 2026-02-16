@@ -557,11 +557,21 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 
 > **阶段**：Phase 1（与 Stop 按钮、文件下载同批实现）。错误体验直接决定用户留存率。
 
-### 9.6 已知前端问题
+### 9.6 已知前端问题（已修复）
 
-| 问题 | 表现 | 可能原因 | 计划修复阶段 |
+| 问题 | 根因分析 | 修复方案 | 状态 |
 |---|---|---|---|
-| **对话区偶尔刷新空白** | 对话中消息区突然清空，显示空白，下方仍显示"AI正在处理中..."，卡顿数秒到十几秒 | SwiftUI List/ScrollView 在大量消息更新时可能触发视图重建；或 SSE 流中断后重连导致状态重置 | Phase 1（优先排查） |
+| **对话区偶尔刷新空白** | 用户点击发送后，前端同时做两件事：① 添加用户消息 + 占位气泡（触发 SwiftUI 重绘 + 动画）；② 立即发起 SSE 请求。后端推理事件在前端重绘未完成时就开始涌入，造成 `LazyVStack` 在 reconciliation 期间短暂清空 | **Ready Gate 机制**：前端必须处于 "ready" 状态后才向后端发请求。具体实现：占位气泡 `onAppear` 作为 ready 信号 → `CheckedContinuation` 等待 → 确认气泡已渲染 → 才发起 SSE 流式请求。附带 500ms 安全超时防死锁。同时流式滚动使用无动画模式避免队列堆积 | ✅ 已修复 |
+
+> **设计哲学**：以用户体验为第一诉求。不在前端未就绪时浪费后端资源，省下的算力留给未来的记忆机制。如果 ready gate 不足以解决流式期间的卡顿，再考虑加入事件节流机制。
+
+### 9.7 滚动到底部浮动按钮
+
+当对话区内容超出一屏，且用户不在底部时，在对话区右下角显示一个圆形向下箭头按钮，点击后平滑滚动到最新消息。
+
+- **检测机制**：在 `LazyVStack` 末尾放置一个 1pt 不可见锚点（`Color.clear.frame(height: 1)`），利用 SwiftUI 的 `onAppear` / `onDisappear` 判断底部是否在可见区域
+- **UI 设计**：36×36 圆形按钮，`chevron.down` 图标，半透明主题色背景 + 阴影，出现/消失带 opacity + scale 动画
+- **滚动行为**：点击按钮触发带动画的 `scrollTo("bottom-anchor")`，滚动完成后按钮自动消失
 
 ---
 
@@ -977,6 +987,8 @@ iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py�
 | **Cron 定时任务** | 启用 cron 工具 + HEARTBEAT.md | 添加"定时任务"管理 UI | openclaw.json 启用 cron | ⭐⭐⭐ |
 | **Heartbeat 心跳** | 配置 heartbeat 周期 | 无（后台自动） | HEARTBEAT.md 配置检查项 | ⭐⭐⭐ |
 | **Stop 按钮** | 中断 SSE 流 + 取消后端请求 | 推理气泡旁 ■ 按钮 | `/api/v2/chat/cancel` | ⭐⭐⭐ |
+| ~~**对话区空白修复**~~ | Ready Gate：占位气泡 onAppear → 才发请求 | ChatView ready gate + 无动画滚动 | 无 | ✅ 已完成 |
+| ~~**滚动到底部按钮**~~ | 底部锚点 + 浮动箭头 | ChatView 悬浮按钮 | 无 | ✅ 已完成 |
 | **子 Agent 派生** | sessions_spawn（ping-pong） | 无（透明执行） | 启用 session tools | ⭐⭐ |
 | **ClawHub 技能** | 安装社区技能到 workspace/skills/ | 添加"技能市场"入口 | 无（agent 自行安装） | ⭐⭐ |
 
@@ -1075,15 +1087,16 @@ RUN npx playwright install --with-deps chromium
 5. ~~TOOLS.md 自动维护~~
 
 **立即做**（Phase 1）：
-1. **错误包装 + LLM 故障转移**（openclaw.json 配置 fallbacks，proxy.py 做错误包装）
+1. ~~**错误包装 + LLM 故障转移**~~（✅ 已完成：openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底）
 2. **文件下载功能**（后端 API + 前端文件卡片 + 预览/分享）
 3. **Stop 按钮**（前端即停，后端异步清理）
-4. **修复对话区刷新空白 Bug**
-5. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
-6. 启用 Cron + Heartbeat
-7. 配置 HEARTBEAT.md 自动检查项
-8. 启用 sessions_spawn（子任务）
-9. 前端"定时任务"管理 UI
+4. ~~**修复对话区刷新空白 Bug**~~（✅ 已修复：Ready Gate 机制，UI ready 后才发请求）
+5. ~~**滚动到底部浮动按钮**~~（✅ 已完成：底部锚点 onAppear/onDisappear + 浮动箭头按钮）
+6. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
+7. 启用 Cron + Heartbeat
+8. 配置 HEARTBEAT.md 自动检查项
+9. 启用 sessions_spawn（子任务）
+10. 前端"定时任务"管理 UI
 
 **1.0 后做**（Phase 2-3）：
 1. Docker 镜像安装 Chromium + Playwright
