@@ -512,22 +512,48 @@ AI 推理和回复过程可能耗时较长（尤其涉及工具调用链时）�
   → 仍失败 → 显示"AI 暂时不可用，请稍后再试"
 ```
 
-**后端实现**（proxy.py 层面）：
+**实现方式：OpenClaw 原生 fallback（无需自建）**
 
-```python
-LLM_FALLBACK_CHAIN = [
-    "deepseek-v3.2",    # 主力
-    "glm-5",            # 备用
-    "glm-4.6v-flash",   # 免费兜底
-]
-# 每次失败自动尝试下一个，最多 3 次
-# 每次切换间隔 < 2 秒，用户等待总时间可控
+OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `openclaw.json` 中配置 `fallbacks` 数组：
+
+```json5
+{
+  agents: {
+    defaults: {
+      model: {
+        primary: "zenmux/deepseek/deepseek-chat",       // 主力
+        fallbacks: [
+          "zenmux/z-ai/glm-4.6v-flash-free",            // 备用（免费）
+          "zenmux/xiaomi/mimo-v2-flash"                  // 兜底（免费）
+        ]
+      }
+    }
+  }
+}
 ```
 
-**关键设计**：
-- 重试过程中 SSE 流不中断——前端保持"正在重试..."状态
-- 切换模型对用户透明，回复质量可能略有差异但服务不中断
-- 所有失败和切换记录到日志，用于后续分析 LLM 稳定性
+**OpenClaw 故障转移流程（自动，无需代码）：**
+
+```
+请求 → DeepSeek V3.2（主力）
+         ↓ 失败（超时/网络/限流）
+       → GLM 4.6V Flash（备用）
+         ↓ 仍失败
+       → MiMo V2 Flash（兜底）
+         ↓ 仍失败
+       → 返回错误 → proxy.py 包装为友好提示
+```
+
+**OpenClaw 还内置 Auth Cooldown 机制：**
+- 某个模型/provider 失败 → 自动指数退避冷却（1min → 5min → 25min → 1h 封顶）
+- 冷却状态持久化到 `auth-profiles.json`，重启后仍生效
+- 同一 session 内粘住同一个 auth profile（缓存友好），直到失败才切换
+
+**这意味着**：
+- **不需要在 proxy.py 中自建 fallback 逻辑** — OpenClaw 网关层已处理
+- proxy.py 只需做**错误包装**：将 OpenClaw 最终返回的错误转为友好提示
+- 切换模型对用户完全透明，回复质量可能略有差异但服务不中断
+- 所有切换记录在 OpenClaw 日志中，可用于分析 LLM 稳定性
 
 > **阶段**：Phase 1（与 Stop 按钮、文件下载同批实现）。错误体验直接决定用户留存率。
 
@@ -1049,7 +1075,7 @@ RUN npx playwright install --with-deps chromium
 5. ~~TOOLS.md 自动维护~~
 
 **立即做**（Phase 1）：
-1. **错误包装 + LLM 故障转移**（用户永远不看到原始报错，主力 LLM 挂了静默切换）
+1. **错误包装 + LLM 故障转移**（openclaw.json 配置 fallbacks，proxy.py 做错误包装）
 2. **文件下载功能**（后端 API + 前端文件卡片 + 预览/分享）
 3. **Stop 按钮**（前端即停，后端异步清理）
 4. **修复对话区刷新空白 Bug**
