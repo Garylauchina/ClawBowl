@@ -3,13 +3,13 @@ import UIKit
 
 // MARK: - UIKit 桥接：可靠检测滚动位置 + 惯性滚动时也能滚到底部
 
-/// 通过 KVO 监听 UIScrollView.contentOffset，解决 SwiftUI 三个问题：
-/// 1. 惯性滚动时按钮无响应 → UIKit 直接操作 setContentOffset
-/// 2. scrollTo 透明锚点导致白屏 → UIKit 计算正确的 contentOffset
-/// 3. 启动时检测不生效 → KVO .initial 选项立即触发
+/// UIKit 桥接：KVO 检测滚动位置 + 停止惯性滚动
+/// - 检测：KVO 监听 contentOffset，计算是否在底部（考虑 adjustedContentInset）
+/// - 停止惯性：setContentOffset(当前位置, animated:false)
+/// - 实际滚动：由外部 SwiftUI proxy.scrollTo 完成（走身份系统，不依赖 contentSize 估算）
 struct ScrollPositionHelper: UIViewRepresentable {
     @Binding var isAtBottom: Bool
-    let scrollToBottomTrigger: UInt
+    let stopMomentumTrigger: UInt
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -22,14 +22,13 @@ struct ScrollPositionHelper: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         let coord = context.coordinator
-        // 找到父级 UIScrollView（只做一次）
         if coord.scrollView == nil {
             DispatchQueue.main.async { coord.attach(from: uiView) }
         }
-        // 响应"滚到底部"触发
-        if coord.lastTrigger != scrollToBottomTrigger {
-            coord.lastTrigger = scrollToBottomTrigger
-            DispatchQueue.main.async { coord.scrollToBottom() }
+        // 响应"停止惯性"触发
+        if coord.lastTrigger != stopMomentumTrigger {
+            coord.lastTrigger = stopMomentumTrigger
+            coord.stopMomentum()
         }
     }
 
@@ -58,9 +57,21 @@ struct ScrollPositionHelper: UIViewRepresentable {
 
         private func checkPosition(_ sv: UIScrollView) {
             guard sv.contentSize.height > 0, sv.frame.height > 0 else { return }
-            let atBottom = sv.contentOffset.y + sv.frame.height >= sv.contentSize.height - 60
+            let inset = sv.adjustedContentInset
+            let maxOffset = sv.contentSize.height + inset.top + inset.bottom - sv.frame.height
+            if maxOffset <= 0 {
+                // 内容不足一屏，始终视为在底部
+                if !lastAtBottom { lastAtBottom = true; notifyChange(true) }
+                return
+            }
+            let distanceFromBottom = maxOffset - sv.contentOffset.y
+            let atBottom = distanceFromBottom <= 80
             guard atBottom != lastAtBottom else { return }
             lastAtBottom = atBottom
+            notifyChange(atBottom)
+        }
+
+        private func notifyChange(_ atBottom: Bool) {
             DispatchQueue.main.async {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     self.parent.isAtBottom = atBottom
@@ -68,11 +79,10 @@ struct ScrollPositionHelper: UIViewRepresentable {
             }
         }
 
-        func scrollToBottom() {
-            guard let sv = scrollView, sv.contentSize.height > sv.frame.height else { return }
+        /// 只停止惯性，不做任何滚动（同步执行）
+        func stopMomentum() {
+            guard let sv = scrollView else { return }
             sv.setContentOffset(sv.contentOffset, animated: false)
-            let bottom = sv.contentSize.height - sv.frame.height + sv.adjustedContentInset.bottom
-            sv.setContentOffset(CGPoint(x: 0, y: max(bottom, 0)), animated: true)
         }
     }
 }
@@ -95,8 +105,10 @@ struct ChatView: View {
     @State private var scrollTrigger: UInt = 0
     /// UIKit KVO 检测：当前是否在底部
     @State private var isAtBottom = true
-    /// 触发 UIKit 滚到底部（递增即触发）
-    @State private var scrollToBottomTrigger: UInt = 0
+    /// 触发 UIKit 停止惯性滚动（递增即触发）
+    @State private var stopMomentumTrigger: UInt = 0
+    /// 存储 ScrollViewProxy，供按钮在停止惯性后调用 scrollTo
+    @State private var scrollProxy: ScrollViewProxy?
     /// Ready Gate：等待占位气泡渲染完成后再发请求
     @State private var readyContinuation: CheckedContinuation<Void, Never>?
     @State private var pendingReadyID: UUID?
@@ -122,14 +134,15 @@ struct ChatView: View {
                             }
                         }
                         .padding(.vertical, 8)
-                        // UIKit 桥接：检测位置 + 处理滚到底部
+                        // UIKit 桥接：检测位置 + 停止惯性
                         .background(ScrollPositionHelper(
                             isAtBottom: $isAtBottom,
-                            scrollToBottomTrigger: scrollToBottomTrigger
+                            stopMomentumTrigger: stopMomentumTrigger
                         ))
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .onAppear {
+                        scrollProxy = proxy
                         // 启动时自动滚动到最新消息
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                             if let lastID = messages.last?.id {
@@ -148,7 +161,16 @@ struct ChatView: View {
                 .overlay(alignment: .bottomTrailing) {
                     if !isAtBottom {
                         Button {
-                            scrollToBottomTrigger &+= 1
+                            // 第一步：UIKit 停止惯性（同步）
+                            stopMomentumTrigger &+= 1
+                            // 第二步：SwiftUI 滚到最后一条消息（走身份系统，位置精确）
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                if let proxy = scrollProxy, let lastID = messages.last?.id {
+                                    withAnimation(.easeOut(duration: 0.3)) {
+                                        proxy.scrollTo(lastID, anchor: .bottom)
+                                    }
+                                }
+                            }
                         } label: {
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 14, weight: .bold))
