@@ -338,6 +338,56 @@ cache/                           # 临时缓存
 
 如果 OpenClaw 内置工具无法处理（如 image 工具失败），Orchestrator 可调用外部视觉模型预处理，将描述文本转发给 OpenClaw。
 
+### 8.4 文件下载（Agent 生成文件 → 用户手机）
+
+Agent 在容器内生成的文件（PDF、PPT、文档、图片等）需要交付给用户。由于容器 workspace 通过 bind mount 已在宿主机上，只需补全"后端下载 API + 前端文件卡片"两个环节。
+
+**完整链路：**
+
+```
+Agent 生成文件（workspace/report.pdf）
+      ↓  bind mount，文件已在宿主机
+后端检测 workspace 新增文件 → 注入 file 事件到 SSE 流
+      ↓
+iOS 解析 file 事件 → 渲染文件卡片
+      ↓
+用户点击 → iOS 调用下载 API → 预览/分享
+```
+
+**后端实现：**
+
+1. **下载 API**：`GET /api/v2/files/download?path={relative_path}`
+   - 将 path 映射到 `/var/lib/clawbowl/runtimes/{rid}/workspace/{path}`
+   - JWT 鉴权 + 路径校验（防目录穿越）
+   - 返回文件流 + Content-Type + Content-Disposition
+
+2. **文件检测**（两种方式互补）：
+   - **workspace diff**：对话结束后对比 workspace 目录快照，找到新增文件（100% 准确）
+   - **响应文本解析**：正则匹配 `.pdf/.pptx/.docx/.xlsx/.png` 等路径（辅助手段）
+
+3. **SSE 文件事件**：检测到新文件后追加到流末尾
+   ```
+   event: file
+   data: {"name":"report.pdf","path":"report.pdf","size":245760,"type":"application/pdf"}
+   ```
+
+**前端实现：**
+
+文件卡片组件（嵌入聊天消息气泡中）：
+
+```
+┌────────────────────────────┐
+│  📄 report.pdf             │
+│  240 KB · PDF 文档          │
+│  [预览]  [保存到手机]       │
+└────────────────────────────┘
+```
+
+- 预览：`QLPreviewController`（iOS 原生，支持 PDF/Office/图片/音视频）
+- 保存：`UIActivityViewController`（分享到"文件"App/微信/邮件等）
+
+> **阶段**：Phase 1 实现。文件生成是 Agent 基础能力，用户看到"已生成报告"但拿不到文件，体验严重缺失。
+
 ---
 
 ## 9. 前端设计哲学
@@ -405,6 +455,35 @@ Agent 回复中可夹带**结构化指令**，iOS App 解析后执行本地操�
 | 健康数据 | HealthKit | ✅ 需授权 | Phase 5 |
 
 注：iOS 没有公开闹钟 API，用本地推送通知替代，效果相同。
+
+### 9.4 Stop 按钮（中断 AI 响应）
+
+AI 推理和回复过程可能耗时较长（尤其涉及工具调用链时），用户需要随时中断的能力。
+
+**UI 设计**：
+
+```
+┌─ AI 推理气泡 ──────────────────── ■ ┐
+│  正在思考...                         │
+│  （浅色推理文字流式输出中）            │
+└──────────────────────────────────────┘
+                                    ↑ Stop 按钮（方块图标）
+```
+
+- 推理/回复进行中时，在消息气泡右上角或下方显示 ■（方块）Stop 按钮
+- 点击后立即：
+  1. **前端**：中断 SSE 流（`URLSessionDataTask.cancel()`），停止消息渲染
+  2. **后端**：调用 `POST /api/v2/chat/cancel` 关闭对 OpenClaw 的请求
+  3. **消息状态**：已接收的部分内容保留，标记为"已中断"
+- 回复完成后 Stop 按钮自动消失
+
+> **阶段**：Phase 1。这是聊天类产品的标配交互，ChatGPT/Claude/Kimi 均有此功能。
+
+### 9.5 已知前端问题
+
+| 问题 | 表现 | 可能原因 | 计划修复阶段 |
+|---|---|---|---|
+| **对话区偶尔刷新空白** | 对话中消息区突然清空，显示空白，下方仍显示"AI正在处理中..."，卡顿数秒到十几秒 | SwiftUI List/ScrollView 在大量消息更新时可能触发视图重建；或 SSE 流中断后重连导致状态重置 | Phase 1（优先排查） |
 
 ---
 
@@ -815,9 +894,11 @@ iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py�
 
 | 能力 | 实现方式 | 前端改动 | 后端改动 | 优先级 |
 |---|---|---|---|---|
+| **文件下载** | 下载 API + SSE file 事件（详见 8.4） | FileCardView + 预览/分享 | `/api/v2/files/download` + workspace diff | ⭐⭐⭐ |
 | **基础 Snapshot** | tar.zst + manifest.json（详见第 6 章） | 无 | 定时任务 + 控制面 API | ⭐⭐⭐ |
 | **Cron 定时任务** | 启用 cron 工具 + HEARTBEAT.md | 添加"定时任务"管理 UI | openclaw.json 启用 cron | ⭐⭐⭐ |
 | **Heartbeat 心跳** | 配置 heartbeat 周期 | 无（后台自动） | HEARTBEAT.md 配置检查项 | ⭐⭐⭐ |
+| **Stop 按钮** | 中断 SSE 流 + 取消后端请求 | 推理气泡旁 ■ 按钮 | `/api/v2/chat/cancel` | ⭐⭐⭐ |
 | **子 Agent 派生** | sessions_spawn（ping-pong） | 无（透明执行） | 启用 session tools | ⭐⭐ |
 | **ClawHub 技能** | 安装社区技能到 workspace/skills/ | 添加"技能市场"入口 | 无（agent 自行安装） | ⭐⭐ |
 
@@ -916,11 +997,14 @@ RUN npx playwright install --with-deps chromium
 5. ~~TOOLS.md 自动维护~~
 
 **立即做**（Phase 1）：
-1. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
-2. 启用 Cron + Heartbeat
-3. 配置 HEARTBEAT.md 自动检查项
-4. 启用 sessions_spawn（子任务）
-5. 前端"定时任务"管理 UI
+1. **文件下载功能**（后端 API + 前端文件卡片 + 预览/分享）
+2. **Stop 按钮**（中断 AI 推理/回复）
+3. **修复对话区刷新空白 Bug**
+4. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
+5. 启用 Cron + Heartbeat
+6. 配置 HEARTBEAT.md 自动检查项
+7. 启用 sessions_spawn（子任务）
+8. 前端"定时任务"管理 UI
 
 **1.0 后做**（Phase 2-3）：
 1. Docker 镜像安装 Chromium + Playwright
