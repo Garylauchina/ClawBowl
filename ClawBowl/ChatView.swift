@@ -22,83 +22,87 @@ struct ChatView: View {
     /// Ready Gate：等待占位气泡渲染完成后再发请求
     @State private var readyContinuation: CheckedContinuation<Void, Never>?
     @State private var pendingReadyID: UUID?
+    /// 存储 ScrollViewProxy 供外层按钮使用
+    @State private var scrollProxy: ScrollViewProxy?
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 // 消息列表
                 ScrollViewReader { proxy in
-                    ZStack(alignment: .bottomTrailing) {
-                        ScrollView {
-                            LazyVStack(spacing: 0) {
-                                ForEach(messages) { message in
-                                    MessageBubble(message: message)
-                                        .id(message.id)
-                                        .onAppear {
-                                            // Ready Gate
-                                            if message.id == pendingReadyID {
-                                                pendingReadyID = nil
-                                                readyContinuation?.resume()
-                                                readyContinuation = nil
-                                            }
-                                            // 最后一条消息可见 → 用户在底部，隐藏按钮
-                                            if message.id == messages.last?.id {
-                                                withAnimation(.easeInOut(duration: 0.2)) {
-                                                    showScrollToBottom = false
-                                                }
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(messages) { message in
+                                MessageBubble(message: message)
+                                    .id(message.id)
+                                    .onAppear {
+                                        // Ready Gate
+                                        if message.id == pendingReadyID {
+                                            pendingReadyID = nil
+                                            readyContinuation?.resume()
+                                            readyContinuation = nil
+                                        }
+                                        // 最后一条消息可见 → 用户在底部，隐藏按钮
+                                        if message.id == messages.last?.id {
+                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                                showScrollToBottom = false
                                             }
                                         }
-                                        .onDisappear {
-                                            // 最后一条消息不可见 → 用户不在底部，显示按钮
-                                            if message.id == messages.last?.id {
-                                                withAnimation(.easeInOut(duration: 0.2)) {
-                                                    showScrollToBottom = true
-                                                }
+                                    }
+                                    .onDisappear {
+                                        // 最后一条消息不可见 → 用户不在底部，显示按钮
+                                        if message.id == messages.last?.id {
+                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                                showScrollToBottom = true
                                             }
                                         }
-                                }
-                                // 底部锚点（仅用于 scrollTo 目标，不承担可见性检测）
-                                Color.clear
-                                    .frame(height: 1)
-                                    .id("bottom-anchor")
+                                    }
                             }
-                            .padding(.vertical, 8)
+                            // 底部锚点（仅用于 scrollTo 目标）
+                            Color.clear
+                                .frame(height: 1)
+                                .id("bottom-anchor")
                         }
-                        .scrollDismissesKeyboard(.interactively)
-                        .onAppear {
-                            // 启动时自动滚动到最新消息（聊天 app 标准行为）
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                                if let lastID = messages.last?.id {
-                                    proxy.scrollTo(lastID, anchor: .bottom)
-                                }
+                        .padding(.vertical, 8)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .onAppear {
+                        scrollProxy = proxy
+                        // 启动时自动滚动到最新消息
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            if let lastID = messages.last?.id {
+                                proxy.scrollTo(lastID, anchor: .bottom)
                             }
                         }
-                        .onChange(of: messages.count) { _ in
-                            scrollToBottom(proxy: proxy, animated: true)
-                        }
-                        .onChange(of: scrollTrigger) { _ in
-                            // streaming 期间不加动画，避免动画队列堆积
-                            scrollToBottom(proxy: proxy, animated: false)
-                        }
-
-                        // 浮动"回到底部"按钮
-                        if showScrollToBottom {
-                            Button {
+                    }
+                    .onChange(of: messages.count) { _ in
+                        scrollToBottom(proxy: proxy, animated: true)
+                    }
+                    .onChange(of: scrollTrigger) { _ in
+                        scrollToBottom(proxy: proxy, animated: false)
+                    }
+                }
+                // 浮动"回到底部"按钮（在 ScrollViewReader 外层，不受 UIScrollView 手势拦截）
+                .overlay(alignment: .bottomTrailing) {
+                    if showScrollToBottom {
+                        Button {
+                            if let proxy = scrollProxy {
                                 scrollToBottom(proxy: proxy, animated: true)
-                            } label: {
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 14, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .frame(width: 36, height: 36)
-                                    .background(Color.accentColor.opacity(0.85))
-                                    .clipShape(Circle())
-                                    .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
                             }
-                            .padding(.trailing, 16)
-                            .padding(.bottom, 8)
-                            .transition(.opacity.combined(with: .scale(scale: 0.8)))
-                            .animation(.easeInOut(duration: 0.2), value: showScrollToBottom)
+                        } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(width: 44, height: 44)
+                                .background(Color.accentColor.opacity(0.85))
+                                .clipShape(Circle())
+                                .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
                         }
+                        .contentShape(Circle())
+                        .padding(.trailing, 16)
+                        .padding(.bottom, 8)
+                        .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                        .animation(.easeInOut(duration: 0.2), value: showScrollToBottom)
                     }
                 }
 
