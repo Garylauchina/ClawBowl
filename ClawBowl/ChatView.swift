@@ -35,20 +35,32 @@ struct ChatView: View {
                                     MessageBubble(message: message)
                                         .id(message.id)
                                         .onAppear {
-                                            // Ready Gate：占位气泡渲染完成，通知 sendMessage 可以发请求了
+                                            // Ready Gate
                                             if message.id == pendingReadyID {
                                                 pendingReadyID = nil
                                                 readyContinuation?.resume()
                                                 readyContinuation = nil
                                             }
+                                            // 最后一条消息可见 → 用户在底部，隐藏按钮
+                                            if message.id == messages.last?.id {
+                                                withAnimation(.easeInOut(duration: 0.2)) {
+                                                    showScrollToBottom = false
+                                                }
+                                            }
+                                        }
+                                        .onDisappear {
+                                            // 最后一条消息不可见 → 用户不在底部，显示按钮
+                                            if message.id == messages.last?.id {
+                                                withAnimation(.easeInOut(duration: 0.2)) {
+                                                    showScrollToBottom = true
+                                                }
+                                            }
                                         }
                                 }
-                                // 底部锚点：用 onAppear/onDisappear 检测是否在底部
+                                // 底部锚点（仅用于 scrollTo 目标，不承担可见性检测）
                                 Color.clear
                                     .frame(height: 1)
                                     .id("bottom-anchor")
-                                    .onAppear { withAnimation(.easeInOut(duration: 0.2)) { showScrollToBottom = false } }
-                                    .onDisappear { withAnimation(.easeInOut(duration: 0.2)) { showScrollToBottom = true } }
                             }
                             .padding(.vertical, 8)
                         }
