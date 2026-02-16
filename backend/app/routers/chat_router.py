@@ -53,34 +53,27 @@ async def chat(
         user.id, len(messages), has_image, body.stream,
     )
 
-    try:
-        if body.stream:
-            # SSE streaming — return chunks as they arrive from OpenClaw
-            generator = proxy_chat_stream(
-                instance=instance,
-                messages=messages,
-                model=body.model,
-            )
-            return StreamingResponse(
-                generator,
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",  # tell Nginx not to buffer
-                },
-            )
-        else:
-            # Non-streaming — wait for full response
-            result = await proxy_chat_request(
-                instance=instance,
-                messages=messages,
-                model=body.model,
-                stream=False,
-            )
-            return result
-    except Exception as exc:
-        logger.error("Proxy error for user %s: %s", user.id, exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"OpenClaw instance error: {exc}",
+    if body.stream:
+        # SSE streaming — proxy handles errors internally (returns friendly message in stream)
+        generator = proxy_chat_stream(
+            instance=instance,
+            messages=messages,
+            model=body.model,
         )
+        return StreamingResponse(
+            generator,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",  # tell Nginx not to buffer
+            },
+        )
+    else:
+        # Non-streaming — proxy handles errors internally (returns friendly message in response)
+        result = await proxy_chat_request(
+            instance=instance,
+            messages=messages,
+            model=body.model,
+            stream=False,
+        )
+        return result

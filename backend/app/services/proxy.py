@@ -32,6 +32,47 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "zenmux/deepseek/deepseek-chat"
 
+# ── User-friendly error messages ─────────────────────────────────────
+# Map technical errors to messages shown in the chat bubble.
+
+_ERROR_MESSAGES: dict[str, str] = {
+    "connect": "网络连接异常，正在重试...",
+    "timeout": "AI 响应超时，请稍后重试",
+    "read": "网络波动，数据读取中断",
+    "server": "AI 服务暂时繁忙，请稍后再试",
+    "unknown": "出了一点小问题，请稍后重试",
+}
+
+
+def _classify_error(exc: Exception) -> str:
+    """Classify an exception into a user-friendly error category."""
+    exc_str = str(exc).lower()
+    if isinstance(exc, httpx.ConnectError):
+        return "connect"
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "timeout"
+    if isinstance(exc, (httpx.ReadTimeout, httpx.ReadError)):
+        return "read"
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code if hasattr(exc, 'response') else 0
+        if code >= 500:
+            return "server"
+        return "unknown"
+    if "timeout" in exc_str or "timed out" in exc_str:
+        return "timeout"
+    if "connect" in exc_str or "connection" in exc_str:
+        return "connect"
+    return "unknown"
+
+
+def _make_error_chunk(message: str) -> str:
+    """Build an SSE line with an error message as content (shown in chat bubble)."""
+    payload = json.dumps(
+        {"choices": [{"delta": {"content": message}, "finish_reason": "stop"}]},
+        ensure_ascii=False,
+    )
+    return f"data: {payload}\n\ndata: [DONE]\n\n"
+
 # OpenClaw tool name → human-readable status (shown as "thinking" text)
 _TOOL_STATUS_MAP: dict[str, str] = {
     "image": "正在分析图片...",
@@ -262,12 +303,23 @@ async def proxy_chat_request(
                 resp = await client.post(url, json=body, headers=headers)
                 resp.raise_for_status()
                 return resp.json()
-        except (httpx.ConnectError, httpx.ReadError) as exc:
+        except Exception as exc:
             last_exc = exc
+            error_cat = _classify_error(exc)
             if attempt == 0:
-                logger.warning("Gateway connection failed, retrying in 5s: %s", exc)
-                await asyncio.sleep(5)
-    raise last_exc  # type: ignore[misc]
+                logger.warning("Gateway connection failed (category=%s), retrying in 3s: %s", error_cat, exc)
+                await asyncio.sleep(3)
+
+    # Return a structured error response instead of raising
+    error_cat = _classify_error(last_exc) if last_exc else "unknown"
+    friendly_msg = _ERROR_MESSAGES.get(error_cat, _ERROR_MESSAGES["unknown"])
+    logger.error("Returning friendly error (non-stream): %s (original: %s)", friendly_msg, last_exc)
+    return {
+        "choices": [{
+            "message": {"role": "assistant", "content": friendly_msg},
+            "finish_reason": "stop",
+        }]
+    }
 
 
 # ── Streaming request ─────────────────────────────────────────────────
@@ -467,10 +519,24 @@ async def proxy_chat_stream(
 
             return
 
-        except (httpx.ConnectError, httpx.ReadError) as exc:
+        except Exception as exc:
             last_exc = exc
+            error_cat = _classify_error(exc)
             if attempt == 0:
-                logger.warning("Gateway stream connection failed, retrying in 5s: %s", exc)
-                await asyncio.sleep(5)
+                logger.warning(
+                    "Gateway stream failed (attempt 1, category=%s): %s",
+                    error_cat, exc,
+                )
+                await asyncio.sleep(3)
+            else:
+                logger.error(
+                    "Gateway stream failed (final, category=%s): %s",
+                    error_cat, exc, exc_info=True,
+                )
 
-    raise last_exc  # type: ignore[misc]
+    # All retries exhausted — send a friendly error message in the SSE stream
+    # instead of raising an exception (which would cause a raw HTTP error).
+    error_cat = _classify_error(last_exc) if last_exc else "unknown"
+    friendly_msg = _ERROR_MESSAGES.get(error_cat, _ERROR_MESSAGES["unknown"])
+    logger.error("Returning friendly error to client: %s (original: %s)", friendly_msg, last_exc)
+    yield _make_error_chunk(friendly_msg)

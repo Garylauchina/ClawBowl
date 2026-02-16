@@ -207,15 +207,17 @@ struct ChatView: View {
                 }
             } catch {
                 await MainActor.run {
+                    let friendlyMsg = Self.friendlyErrorMessage(for: error)
                     if let lastIdx = messages.indices.last,
                        messages[lastIdx].role == .assistant && messages[lastIdx].isStreaming {
-                        messages[lastIdx].content = "抱歉，出了点问题：\(error.localizedDescription)。请稍后重试。"
+                        messages[lastIdx].content = friendlyMsg
                         messages[lastIdx].status = .error
                         messages[lastIdx].isStreaming = false
+                        messages[lastIdx].thinkingText = ""
                     } else {
                         let errorMessage = Message(
                             role: .assistant,
-                            content: "抱歉，出了点问题：\(error.localizedDescription)。请稍后重试。",
+                            content: friendlyMsg,
                             status: .error
                         )
                         withAnimation(.easeInOut(duration: 0.2)) {
@@ -223,7 +225,7 @@ struct ChatView: View {
                         }
                     }
                     isLoading = false
-                    MessageStore.save(messages)  // 持久化
+                    MessageStore.save(messages)
                 }
             }
         }
@@ -240,6 +242,40 @@ struct ChatView: View {
         Task {
             await ChatService.shared.resetSession()
         }
+    }
+
+    /// 将技术错误转换为用户友好的提示（后端已包装大部分错误，此处兜底前端/网络层错误）
+    private static func friendlyErrorMessage(for error: Error) -> String {
+        // ChatError 已经有友好描述
+        if let chatError = error as? ChatError {
+            return chatError.localizedDescription
+        }
+
+        let desc = error.localizedDescription.lowercased()
+
+        // 网络连接类
+        if desc.contains("network") || desc.contains("internet") || desc.contains("offline")
+            || desc.contains("not connected") {
+            return "网络连接异常，请检查网络后重试"
+        }
+
+        // 超时类
+        if desc.contains("timed out") || desc.contains("timeout") {
+            return "请求超时，AI 可能正在处理复杂任务，请稍后重试"
+        }
+
+        // SSL/安全类
+        if desc.contains("ssl") || desc.contains("certificate") || desc.contains("trust") {
+            return "安全连接异常，请稍后重试"
+        }
+
+        // 取消（用户主动或系统）
+        if desc.contains("cancel") {
+            return "请求已取消"
+        }
+
+        // 兜底：不暴露技术细节
+        return "服务暂时不可用，请稍后重试"
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy) {
