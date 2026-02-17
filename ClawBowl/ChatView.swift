@@ -38,6 +38,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
         var observation: NSKeyValueObservation?
         var lastAtBottom = true
         var lastTrigger: UInt = 0
+        private var pendingNotify: DispatchWorkItem?
 
         init(parent: ScrollPositionHelper) { self.parent = parent }
 
@@ -46,7 +47,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
             while let p = cur?.superview {
                 if let sv = p as? UIScrollView {
                     scrollView = sv
-                    observation = sv.observe(\.contentOffset, options: [.new, .initial]) { [weak self] sv, _ in
+                    observation = sv.observe(\.contentOffset, options: [.new]) { [weak self] sv, _ in
                         self?.checkPosition(sv)
                     }
                     break
@@ -59,24 +60,26 @@ struct ScrollPositionHelper: UIViewRepresentable {
             guard sv.contentSize.height > 0, sv.frame.height > 0 else { return }
             let inset = sv.adjustedContentInset
             let maxOffset = sv.contentSize.height + inset.top + inset.bottom - sv.frame.height
+            let atBottom: Bool
             if maxOffset <= 0 {
-                // 内容不足一屏，始终视为在底部
-                if !lastAtBottom { lastAtBottom = true; notifyChange(true) }
-                return
+                atBottom = true
+            } else {
+                let distanceFromBottom = maxOffset - sv.contentOffset.y
+                atBottom = distanceFromBottom <= 80
             }
-            let distanceFromBottom = maxOffset - sv.contentOffset.y
-            let atBottom = distanceFromBottom <= 80
             guard atBottom != lastAtBottom else { return }
             lastAtBottom = atBottom
             notifyChange(atBottom)
         }
 
         private func notifyChange(_ atBottom: Bool) {
-            DispatchQueue.main.async {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    self.parent.isAtBottom = atBottom
-                }
+            pendingNotify?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.parent.isAtBottom = atBottom
             }
+            pendingNotify = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
         }
 
         /// 只停止惯性，不做任何滚动（同步执行）
@@ -142,7 +145,7 @@ struct ChatView: View {
                             stopMomentumTrigger: stopMomentumTrigger
                         ))
                     }
-                    .scrollDismissesKeyboard(.interactively)
+                    .scrollDismissesKeyboard(.immediately)
                     .onAppear {
                         scrollProxy = proxy
                         // 启动时自动滚动到最新消息
@@ -163,14 +166,10 @@ struct ChatView: View {
                 .overlay(alignment: .bottomTrailing) {
                     if !isAtBottom {
                         Button {
-                            // 第一步：UIKit 停止惯性（同步）
                             stopMomentumTrigger &+= 1
-                            // 第二步：SwiftUI 滚到最后一条消息（走身份系统，位置精确）
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                 if let proxy = scrollProxy, let lastID = messages.last?.id {
-                                    withAnimation(.easeOut(duration: 0.3)) {
-                                        proxy.scrollTo(lastID, anchor: .bottom)
-                                    }
+                                    proxy.scrollTo(lastID, anchor: .bottom)
                                 }
                             }
                         } label: {
@@ -185,9 +184,9 @@ struct ChatView: View {
                         .padding(.trailing, 16)
                         .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .scale(scale: 0.8)))
-                        .animation(.easeInOut(duration: 0.2), value: isAtBottom)
                     }
                 }
+                .animation(.easeInOut(duration: 0.25), value: isAtBottom)
 
                 // 内容过滤提示横幅
                 .overlay(alignment: .bottom) {
