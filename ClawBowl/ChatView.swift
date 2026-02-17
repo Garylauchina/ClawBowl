@@ -91,9 +91,12 @@ struct ScrollPositionHelper: UIViewRepresentable {
 /// 聊天主视图
 struct ChatView: View {
     @Environment(\.authService) private var authService
-    @State private var messages: [Message] = []
-    /// 标记消息是否已从本地存储加载完成
-    @State private var messagesLoaded = false
+    @State private var messages: [Message] = {
+        if let saved = MessageStore.load() {
+            return saved
+        }
+        return [Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")]
+    }()
     @State private var inputText = ""
     @State private var selectedAttachment: Attachment?
     @State private var isLoading = false
@@ -247,16 +250,6 @@ struct ChatView: View {
                 }
             } message: {
                 Text("确定要退出登录吗？")
-            }
-            .task {
-                guard !messagesLoaded else { return }
-                messagesLoaded = true
-                let loaded = await Task.detached { MessageStore.load() }.value
-                if let saved = loaded, !saved.isEmpty {
-                    messages = saved
-                } else {
-                    messages = [Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")]
-                }
             }
         }
     }
