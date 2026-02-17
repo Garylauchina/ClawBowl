@@ -59,9 +59,8 @@ class StartupController: ObservableObject {
                 progressText = "正在启动 AI 引擎..."
                 await warmupContainerQuiet()
 
-                // ④ 初始化服务
+                // ④ 准备聊天服务
                 progressText = "正在准备聊天服务..."
-                _ = ChatService.shared
                 await smallDelay(0.3)
             } else {
                 // 未登录，跳过后端预热

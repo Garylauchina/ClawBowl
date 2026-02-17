@@ -349,50 +349,17 @@ struct ChatView: View {
                 // 缓存 placeholder 索引（刚 append，一定在末尾）
                 let cachedIdx = await MainActor.run { messages.count - 1 }
                 var wasFiltered = false
-                var pendingThinking = ""
-                var pendingContent = ""
-                var contentReplaced = false  // thinking→content 首次替换是否已发生
-                var lastFlushTime = CACurrentMediaTime()
-                let flushInterval = 0.10  // 100ms
-
-                /// 将缓冲内容刷新到 UI
-                @Sendable func flushToUI() async {
-                    let t = pendingThinking; let c = pendingContent
-                    pendingThinking = ""; pendingContent = ""
-                    lastFlushTime = CACurrentMediaTime()
-                    guard !t.isEmpty || !c.isEmpty else { return }
-                    await MainActor.run {
-                        guard cachedIdx < messages.count else { return }
-                        if !t.isEmpty {
-                            messages[cachedIdx].thinkingText += t
-                            if messages[cachedIdx].thinkingText.count > 1000 {
-                                let text = messages[cachedIdx].thinkingText
-                                let start = text.index(text.endIndex, offsetBy: -800)
-                                messages[cachedIdx].thinkingText = "…" + String(text[start...])
-                            }
-                        }
-                        if !c.isEmpty {
-                            if !contentReplaced && !messages[cachedIdx].thinkingText.isEmpty {
-                                messages[cachedIdx].thinkingText = ""
-                                messages[cachedIdx].content = c
-                            } else {
-                                messages[cachedIdx].content += c
-                            }
-                            scrollTrigger &+= 1
-                        }
-                    }
-                    if !c.isEmpty { contentReplaced = true }
-                }
+                var buf = StreamBuffer()
 
                 for try await event in stream {
                     switch event {
                     case .thinking(let status):
-                        pendingThinking += status
+                        buf.thinking += status
                     case .content(let text):
-                        pendingContent += text
+                        buf.content += text
                     case .filtered(let text):
-                        // 立即刷新 filtered 事件
-                        await flushToUI()
+                        // 先刷新剩余缓冲，再处理 filtered
+                        buf = await flushStreamBuffer(buf, at: cachedIdx)
                         await MainActor.run {
                             guard cachedIdx < messages.count else { return }
                             messages[cachedIdx].content = text
@@ -402,8 +369,7 @@ struct ChatView: View {
                         }
                         wasFiltered = true
                     case .done:
-                        // 立即刷新剩余缓冲
-                        await flushToUI()
+                        buf = await flushStreamBuffer(buf, at: cachedIdx)
                         await MainActor.run {
                             guard cachedIdx < messages.count else { return }
                             messages[cachedIdx].isStreaming = false
@@ -415,8 +381,8 @@ struct ChatView: View {
 
                     // 节流：仅在超过刷新间隔时刷新 UI
                     let now = CACurrentMediaTime()
-                    if now - lastFlushTime >= flushInterval {
-                        await flushToUI()
+                    if now - buf.lastFlushTime >= 0.10 {
+                        buf = await flushStreamBuffer(buf, at: cachedIdx)
                     }
                 }
 
@@ -530,6 +496,47 @@ struct ChatView: View {
             proxy.scrollTo(lastID, anchor: .bottom)
         }
     }
+
+    // MARK: - Stream buffer flush (值类型，避免并发捕获警告)
+
+    /// 将流式缓冲刷新到 UI，返回重置后的新 buffer
+    private func flushStreamBuffer(_ buf: StreamBuffer, at idx: Int) async -> StreamBuffer {
+        let t = buf.thinking; let c = buf.content
+        let wasReplaced = buf.contentReplaced
+        var next = StreamBuffer()
+        next.contentReplaced = wasReplaced
+        guard !t.isEmpty || !c.isEmpty else { return next }
+        await MainActor.run {
+            guard idx < messages.count else { return }
+            if !t.isEmpty {
+                messages[idx].thinkingText += t
+                if messages[idx].thinkingText.count > 1000 {
+                    let text = messages[idx].thinkingText
+                    let start = text.index(text.endIndex, offsetBy: -800)
+                    messages[idx].thinkingText = "…" + String(text[start...])
+                }
+            }
+            if !c.isEmpty {
+                if !wasReplaced && !messages[idx].thinkingText.isEmpty {
+                    messages[idx].thinkingText = ""
+                    messages[idx].content = c
+                } else {
+                    messages[idx].content += c
+                }
+                scrollTrigger &+= 1
+            }
+        }
+        if !c.isEmpty { next.contentReplaced = true }
+        return next
+    }
+}
+
+/// 流式节流缓冲区（值类型，可安全跨 await 传递）
+private struct StreamBuffer {
+    var thinking = ""
+    var content = ""
+    var contentReplaced = false
+    var lastFlushTime = CACurrentMediaTime()
 }
 
 #Preview {
