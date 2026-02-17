@@ -1,3 +1,4 @@
+import QuartzCore   // CACurrentMediaTime
 import SwiftUI
 import UIKit
 
@@ -90,12 +91,9 @@ struct ScrollPositionHelper: UIViewRepresentable {
 /// 聊天主视图
 struct ChatView: View {
     @Environment(\.authService) private var authService
-    @State private var messages: [Message] = {
-        if let saved = MessageStore.load() {
-            return saved
-        }
-        return [Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")]
-    }()
+    @State private var messages: [Message] = []
+    /// 标记消息是否已从本地存储加载完成
+    @State private var messagesLoaded = false
     @State private var inputText = ""
     @State private var selectedAttachment: Attachment?
     @State private var isLoading = false
@@ -250,6 +248,16 @@ struct ChatView: View {
             } message: {
                 Text("确定要退出登录吗？")
             }
+            .task {
+                guard !messagesLoaded else { return }
+                messagesLoaded = true
+                let loaded = await Task.detached { MessageStore.load() }.value
+                if let saved = loaded, !saved.isEmpty {
+                    messages = saved
+                } else {
+                    messages = [Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")]
+                }
+            }
         }
     }
 
@@ -337,40 +345,78 @@ struct ChatView: View {
                     history: historyMessages
                 )
 
-                // 逐事件更新占位消息
+                // ── 流式节流：本地缓冲 + 100ms 刷新 ──
+                // 缓存 placeholder 索引（刚 append，一定在末尾）
+                let cachedIdx = await MainActor.run { messages.count - 1 }
                 var wasFiltered = false
-                for try await event in stream {
+                var pendingThinking = ""
+                var pendingContent = ""
+                var contentReplaced = false  // thinking→content 首次替换是否已发生
+                var lastFlushTime = CACurrentMediaTime()
+                let flushInterval = 0.10  // 100ms
+
+                /// 将缓冲内容刷新到 UI
+                @Sendable func flushToUI() async {
+                    let t = pendingThinking; let c = pendingContent
+                    pendingThinking = ""; pendingContent = ""
+                    lastFlushTime = CACurrentMediaTime()
+                    guard !t.isEmpty || !c.isEmpty else { return }
                     await MainActor.run {
-                        guard let idx = messages.firstIndex(where: { $0.id == placeholderID }) else { return }
-                        switch event {
-                        case .thinking(let status):
-                            messages[idx].thinkingText += status
-                            // 截断超长文本防止 UI 卡顿（保留最近 800 字符）
-                            if messages[idx].thinkingText.count > 1000 {
-                                let text = messages[idx].thinkingText
+                        guard cachedIdx < messages.count else { return }
+                        if !t.isEmpty {
+                            messages[cachedIdx].thinkingText += t
+                            if messages[cachedIdx].thinkingText.count > 1000 {
+                                let text = messages[cachedIdx].thinkingText
                                 let start = text.index(text.endIndex, offsetBy: -800)
-                                messages[idx].thinkingText = "…" + String(text[start...])
-                            }
-                        case .content(let text):
-                            if !messages[idx].thinkingText.isEmpty {
-                                messages[idx].thinkingText = ""
-                                messages[idx].content = text  // 替换（首次）
-                            } else {
-                                messages[idx].content += text  // 追加（后续）
-                            }
-                            scrollTrigger &+= 1
-                        case .filtered(let text):
-                            messages[idx].content = text
-                            messages[idx].thinkingText = ""
-                            messages[idx].status = .filtered
-                            messages[idx].isStreaming = false
-                            wasFiltered = true
-                        case .done:
-                            messages[idx].isStreaming = false
-                            if !messages[idx].content.isEmpty {
-                                messages[idx].thinkingText = ""
+                                messages[cachedIdx].thinkingText = "…" + String(text[start...])
                             }
                         }
+                        if !c.isEmpty {
+                            if !contentReplaced && !messages[cachedIdx].thinkingText.isEmpty {
+                                messages[cachedIdx].thinkingText = ""
+                                messages[cachedIdx].content = c
+                            } else {
+                                messages[cachedIdx].content += c
+                            }
+                            scrollTrigger &+= 1
+                        }
+                    }
+                    if !c.isEmpty { contentReplaced = true }
+                }
+
+                for try await event in stream {
+                    switch event {
+                    case .thinking(let status):
+                        pendingThinking += status
+                    case .content(let text):
+                        pendingContent += text
+                    case .filtered(let text):
+                        // 立即刷新 filtered 事件
+                        await flushToUI()
+                        await MainActor.run {
+                            guard cachedIdx < messages.count else { return }
+                            messages[cachedIdx].content = text
+                            messages[cachedIdx].thinkingText = ""
+                            messages[cachedIdx].status = .filtered
+                            messages[cachedIdx].isStreaming = false
+                        }
+                        wasFiltered = true
+                    case .done:
+                        // 立即刷新剩余缓冲
+                        await flushToUI()
+                        await MainActor.run {
+                            guard cachedIdx < messages.count else { return }
+                            messages[cachedIdx].isStreaming = false
+                            if !messages[cachedIdx].content.isEmpty {
+                                messages[cachedIdx].thinkingText = ""
+                            }
+                        }
+                    }
+
+                    // 节流：仅在超过刷新间隔时刷新 UI
+                    let now = CACurrentMediaTime()
+                    if now - lastFlushTime >= flushInterval {
+                        await flushToUI()
                     }
                 }
 
@@ -390,14 +436,14 @@ struct ChatView: View {
                             }
                         }
                     } else {
-                        if let idx = messages.firstIndex(where: { $0.id == placeholderID }) {
-                            messages[idx].isStreaming = false
-                            if !messages[idx].content.isEmpty {
-                                messages[idx].thinkingText = ""
+                        if cachedIdx < messages.count {
+                            messages[cachedIdx].isStreaming = false
+                            if !messages[cachedIdx].content.isEmpty {
+                                messages[cachedIdx].thinkingText = ""
                             }
-                            if messages[idx].content.isEmpty && messages[idx].thinkingText.isEmpty {
-                                messages[idx].content = "AI 未返回内容，请重试。"
-                                messages[idx].status = .error
+                            if messages[cachedIdx].content.isEmpty && messages[cachedIdx].thinkingText.isEmpty {
+                                messages[cachedIdx].content = "AI 未返回内容，请重试。"
+                                messages[cachedIdx].status = .error
                             }
                         }
                         MessageStore.save(messages)

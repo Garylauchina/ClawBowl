@@ -409,12 +409,22 @@ async def proxy_chat_stream(
                                     "".join(thinking_batch)
                                 )
                                 thinking_batch.clear()
-                            # Detect empty response (0 chunks) — likely safety filter
                             if chunk_count == 0:
-                                logger.warning(
-                                    "Empty SSE response (0 chunks) — possible content safety filter"
-                                )
-                                yield _make_filtered_chunk()
+                                msg_count = len(messages)
+                                if msg_count > 4:
+                                    # Substantial history → likely content safety filter
+                                    logger.warning(
+                                        "Empty SSE response (0 chunks, %d msgs) — content safety filter",
+                                        msg_count,
+                                    )
+                                    yield _make_filtered_chunk()
+                                else:
+                                    # Short conversation → likely instance startup issue
+                                    logger.warning(
+                                        "Empty SSE response (0 chunks, %d msgs) — instance may not be ready",
+                                        msg_count,
+                                    )
+                                    yield _make_content_chunk("AI 暂时无法响应，请稍后重试")
                             # Emit last turn's buffer as real content
                             elif content_buf:
                                 final = "".join(content_buf).strip()

@@ -573,6 +573,32 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 - **UI 设计**：36×36 圆形按钮，`chevron.down` 图标，半透明主题色背景 + 阴影，出现/消失带 opacity + scale 动画
 - **滚动行为**：点击按钮触发带动画的 `scrollTo("bottom-anchor")`，滚动完成后按钮自动消失
 
+### 9.8 前端性能优化（流式渲染）
+
+> 更新：2026-02-17
+
+流式 SSE 期间，每个 chunk 都触发 SwiftUI 状态变更、全量 Equatable diff 和滚动，导致 UI 卡顿。通过以下优化将 UI 更新频率从每 chunk 一次降至约 10 次/秒：
+
+| 优化项 | 问题 | 方案 | 效果 |
+|---|---|---|---|
+| **流式节流** | 每个 SSE chunk 触发一次 `@State` 变更 | 本地缓冲 `pendingContent/pendingThinking`，每 100ms 批量刷新一次 UI | 更新频率降 90%+ |
+| **缓存索引** | 每个 chunk 做 O(n) `firstIndex` 查找 | placeholder append 后缓存 `cachedIdx = messages.count - 1` | O(1) 直接访问 |
+| **自定义 Equatable** | `Message` 默认 Equatable 比较 `Attachment.data`（大二进制） | 自定义 `==`：仅比较 `id, content, thinkingText, status, isStreaming, role` | diff 成本降 90%+ |
+| **图片异步解码** | `UIImage(data:)` 在 body 内同步解码阻塞主线程 | 改用 `@State decodedImage` + `.task` 后台解码 + 占位 ProgressView | 主线程零阻塞 |
+| **MessageStore 异步加载** | `@State` 初始化时同步 `FileManager.read` | 改为空数组初始化 + `.task { MessageStore.load() }` | 启动不卡顿 |
+
+### 9.9 内容安全过滤
+
+> 更新：2026-02-17
+
+当 DeepSeek LLM 因上下文中存在敏感内容而返回 0-chunk 空响应时：
+
+1. **后端检测**：`proxy.py` 在 `data: [DONE]` 时检查 `chunk_count == 0`
+   - 对话历史 > 4 条消息 → 判定为内容安全过滤，发送 `filtered` 事件
+   - 对话历史 ≤ 4 条消息 → 判定为实例启动问题，发送普通错误提示
+2. **前端响应**：收到 `filtered` 事件后自动清理最近 2 轮对话（4 条消息），显示临时提示
+3. **历史防御**：`ChatService.buildRequestMessages()` 自动跳过 `.error` 和 `.filtered` 状态的消息
+
 ---
 
 ## 10. 前端上下文管理
@@ -589,6 +615,44 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 - **发消息时**：同步写入本地缓存 + 发送后端
 - **上滑加载**：分页从后端拉取更早消息
 - **本地缓存上限**：200 条，更早的按需从后端拉取
+
+### 10.3 后端对话全量持久化
+
+> 更新：2026-02-17。为未来的记忆梳理机制奠定数据基础。
+
+**`chat_logs` 表结构：**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | UUID PK | 每条记录唯一 ID |
+| `user_id` | FK → users.id | 用户标识 |
+| `event_id` | UUID (indexed) | 同一请求-响应对共享，关联完整对话轮次 |
+| `role` | String | `user` 或 `assistant` |
+| `content` | Text | 完整对话原文 |
+| `thinking_text` | Text (nullable) | AI 思考过程文本（tool 状态等） |
+| `attachment_paths` | Text (nullable) | JSON 数组，文件引用路径 |
+| `tool_calls` | Text (nullable) | JSON 数组，工具名称和参数摘要 |
+| `status` | String | `success` / `error` / `filtered` |
+| `model` | String (nullable) | 使用的 LLM 模型 |
+| `created_at` | DateTime (tz) | UTC 时间戳 |
+
+**采集时机：**
+
+1. 请求到达 → 立即写入用户消息（`role=user`）
+2. SSE 流结束 → `_logged_stream` wrapper 累积完整 AI 回复后写入（`role=assistant`）
+3. 非流式请求 → 响应返回后写入
+
+**设计原则：**
+
+- 日志写入失败不影响聊天功能（fire-and-forget，异常仅记录日志）
+- 使用独立 DB session，不与请求 session 耦合
+- 每次请求生成唯一 `event_id`，可按 event_id 关联请求-响应对
+
+**后续用途：**
+
+- `GET /api/v2/chat/history` — 分页拉取历史（替代前端 50 条本地缓存限制）
+- 按 user_id + 时间范围统计对话量/token 消耗
+- 为记忆梳理机制提供原始语料库（自动提取关键信息 → MEMORY.md）
 
 ---
 

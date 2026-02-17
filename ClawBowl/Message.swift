@@ -29,7 +29,7 @@ struct Attachment: Equatable {
 // MARK: - Message
 
 /// 聊天消息模型
-struct Message: Identifiable, Equatable {
+struct Message: Identifiable {
     let id: UUID
     let role: Role
     var content: String
@@ -76,6 +76,19 @@ struct Message: Identifiable, Equatable {
     var hasAttachment: Bool { attachment != nil }
     /// 是否包含图片附件
     var hasImage: Bool { attachment?.isImage ?? false }
+}
+
+// MARK: - Custom Equatable (skip expensive Attachment.data comparison)
+
+extension Message: Equatable {
+    static func == (lhs: Message, rhs: Message) -> Bool {
+        lhs.id == rhs.id
+            && lhs.content == rhs.content
+            && lhs.thinkingText == rhs.thinkingText
+            && lhs.status == rhs.status
+            && lhs.isStreaming == rhs.isStreaming
+            && lhs.role == rhs.role
+    }
 }
 
 // MARK: - Message Persistence

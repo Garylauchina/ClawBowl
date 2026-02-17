@@ -4,6 +4,9 @@ import SwiftUI
 struct MessageBubble: View {
     let message: Message
 
+    /// 异步解码后的图片（避免在 body 中同步解码大图阻塞主线程）
+    @State private var decodedImage: UIImage?
+
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             if message.role == .assistant {
@@ -15,12 +18,18 @@ struct MessageBubble: View {
                 VStack(alignment: .leading, spacing: 6) {
                     // 附件（图片缩略图 或 文件图标+文件名）
                     if let att = message.attachment {
-                        if att.isImage, let uiImage = UIImage(data: att.data) {
+                        if att.isImage, let uiImage = decodedImage {
                             Image(uiImage: uiImage)
                                 .resizable()
                                 .scaledToFit()
                                 .frame(maxWidth: 240, maxHeight: 240)
                                 .clipShape(RoundedRectangle(cornerRadius: 10))
+                        } else if att.isImage {
+                            // 图片解码中的占位
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color(.systemGray5))
+                                .frame(width: 120, height: 120)
+                                .overlay(ProgressView())
                         } else {
                             // 文件附件
                             HStack(spacing: 8) {
@@ -92,15 +101,20 @@ struct MessageBubble: View {
                     }
                     if message.hasImage {
                         Button {
-                            if let att = message.attachment,
-                               att.isImage,
-                               let img = UIImage(data: att.data) {
+                            if let img = decodedImage {
                                 UIPasteboard.general.image = img
                             }
                         } label: {
                             Label("复制图片", systemImage: "photo.on.rectangle")
                         }
                     }
+                }
+                .task(id: message.attachment?.filename) {
+                    guard let att = message.attachment, att.isImage, decodedImage == nil else { return }
+                    let data = att.data
+                    decodedImage = await Task.detached {
+                        UIImage(data: data)
+                    }.value
                 }
 
                 // 时间和状态
