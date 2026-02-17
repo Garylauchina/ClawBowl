@@ -51,6 +51,7 @@ struct Message: Identifiable, Equatable {
         case sending
         case sent
         case error
+        case filtered
     }
 
     init(
@@ -253,4 +254,6 @@ struct StreamDelta: Decodable {
     let content: String?
     /// 工具执行状态（自定义字段，用于展示"思考过程"）
     let thinking: String?
+    /// 内容安全过滤标记（后端检测到 0-chunk 空响应时设为 true）
+    let filtered: Bool?
 }

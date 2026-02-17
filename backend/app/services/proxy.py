@@ -73,6 +73,18 @@ def _make_error_chunk(message: str) -> str:
     )
     return f"data: {payload}\n\ndata: [DONE]\n\n"
 
+
+_FILTERED_MESSAGE = "该内容暂时无法处理，已自动清理相关对话记录，请换个话题继续。"
+
+
+def _make_filtered_chunk(message: str = _FILTERED_MESSAGE) -> str:
+    """Build an SSE line indicating content was filtered by safety review."""
+    payload = json.dumps(
+        {"choices": [{"delta": {"content": message, "filtered": True}, "finish_reason": "stop"}]},
+        ensure_ascii=False,
+    )
+    return f"data: {payload}\n\n"
+
 # OpenClaw tool name → human-readable status (shown as "thinking" text)
 _TOOL_STATUS_MAP: dict[str, str] = {
     "image": "正在分析图片...",
@@ -397,8 +409,14 @@ async def proxy_chat_stream(
                                     "".join(thinking_batch)
                                 )
                                 thinking_batch.clear()
+                            # Detect empty response (0 chunks) — likely safety filter
+                            if chunk_count == 0:
+                                logger.warning(
+                                    "Empty SSE response (0 chunks) — possible content safety filter"
+                                )
+                                yield _make_filtered_chunk()
                             # Emit last turn's buffer as real content
-                            if content_buf:
+                            elif content_buf:
                                 final = "".join(content_buf).strip()
                                 if final:
                                     yield _make_content_chunk(final)

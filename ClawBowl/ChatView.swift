@@ -112,6 +112,8 @@ struct ChatView: View {
     /// Ready Gate：等待占位气泡渲染完成后再发请求
     @State private var readyContinuation: CheckedContinuation<Void, Never>?
     @State private var pendingReadyID: UUID?
+    /// 内容过滤提示（短暂显示后自动消失）
+    @State private var filteredNotice: String?
 
     var body: some View {
         NavigationStack {
@@ -184,6 +186,22 @@ struct ChatView: View {
                         .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .scale(scale: 0.8)))
                         .animation(.easeInOut(duration: 0.2), value: isAtBottom)
+                    }
+                }
+
+                // 内容过滤提示横幅
+                .overlay(alignment: .bottom) {
+                    if let notice = filteredNotice {
+                        Text(notice)
+                            .font(.footnote)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(Color.orange.opacity(0.9))
+                            .cornerRadius(20)
+                            .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+                            .padding(.bottom, 8)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
 
@@ -320,6 +338,7 @@ struct ChatView: View {
                 )
 
                 // 逐事件更新占位消息
+                var wasFiltered = false
                 for try await event in stream {
                     await MainActor.run {
                         guard let idx = messages.firstIndex(where: { $0.id == placeholderID }) else { return }
@@ -340,6 +359,12 @@ struct ChatView: View {
                                 messages[idx].content += text  // 追加（后续）
                             }
                             scrollTrigger &+= 1
+                        case .filtered(let text):
+                            messages[idx].content = text
+                            messages[idx].thinkingText = ""
+                            messages[idx].status = .filtered
+                            messages[idx].isStreaming = false
+                            wasFiltered = true
                         case .done:
                             messages[idx].isStreaming = false
                             if !messages[idx].content.isEmpty {
@@ -351,18 +376,33 @@ struct ChatView: View {
 
                 // 流结束
                 await MainActor.run {
-                    if let idx = messages.firstIndex(where: { $0.id == placeholderID }) {
-                        messages[idx].isStreaming = false
-                        if !messages[idx].content.isEmpty {
-                            messages[idx].thinkingText = ""
+                    if wasFiltered {
+                        // 自动清洗：移除最近 2 轮对话（当前 filtered 对 + 上一轮可能含敏感内容的对）
+                        let removeCount = min(messages.count, 4)
+                        messages.removeLast(removeCount)
+                        MessageStore.save(messages)
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            filteredNotice = "检测到内容限制，已自动清理相关对话，请继续"
                         }
-                        if messages[idx].content.isEmpty && messages[idx].thinkingText.isEmpty {
-                            messages[idx].content = "AI 未返回内容，请重试。"
-                            messages[idx].status = .error
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                            withAnimation(.easeInOut(duration: 0.5)) {
+                                filteredNotice = nil
+                            }
                         }
+                    } else {
+                        if let idx = messages.firstIndex(where: { $0.id == placeholderID }) {
+                            messages[idx].isStreaming = false
+                            if !messages[idx].content.isEmpty {
+                                messages[idx].thinkingText = ""
+                            }
+                            if messages[idx].content.isEmpty && messages[idx].thinkingText.isEmpty {
+                                messages[idx].content = "AI 未返回内容，请重试。"
+                                messages[idx].status = .error
+                            }
+                        }
+                        MessageStore.save(messages)
                     }
                     isLoading = false
-                    MessageStore.save(messages)  // 持久化
                 }
             } catch {
                 await MainActor.run {

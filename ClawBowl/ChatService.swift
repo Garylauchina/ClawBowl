@@ -7,6 +7,8 @@ enum StreamEvent {
     case thinking(String)
     /// 正常文本内容增量
     case content(String)
+    /// 内容被安全审核过滤（0-chunk 空响应）
+    case filtered(String)
     /// 流结束
     case done
 }
@@ -30,8 +32,21 @@ actor ChatService {
         var requestMessages: [ChatCompletionRequest.RequestMessage] = []
 
         // 历史消息（最近 20 条），附件用文本标记代替
-        let recentHistory = history.suffix(20)
-        for msg in recentHistory {
+        // 兜底过滤：跳过 .error/.filtered 状态的 assistant 消息及其前面紧邻的 user 消息
+        let recentHistory = Array(history.suffix(20))
+        var indicesToSkip = Set<Int>()
+        for i in (0..<recentHistory.count).reversed() {
+            let msg = recentHistory[i]
+            if msg.role == .assistant && (msg.status == .error || msg.status == .filtered) {
+                indicesToSkip.insert(i)
+                // 找前面紧邻的 user 消息
+                if i > 0 && recentHistory[i - 1].role == .user {
+                    indicesToSkip.insert(i - 1)
+                }
+            }
+        }
+        for (i, msg) in recentHistory.enumerated() {
+            if indicesToSkip.contains(i) { continue }
             if let att = msg.attachment {
                 let label = att.isImage ? "[图片]" : "[文件: \(att.filename)]"
                 let text = msg.content.isEmpty ? label : "\(msg.content)\n\(label)"
@@ -153,6 +168,12 @@ actor ChatService {
                         }
 
                         guard let delta = chunk.choices?.first?.delta else { continue }
+
+                        // Content safety filter (0-chunk empty response)
+                        if delta.filtered == true, let text = delta.content {
+                            continuation.yield(.filtered(text))
+                            continue
+                        }
 
                         // Thinking status (tool execution)
                         if let thinking = delta.thinking, !thinking.isEmpty {
