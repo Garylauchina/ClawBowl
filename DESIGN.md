@@ -1039,6 +1039,9 @@ iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py�
 | 记忆系统 | MEMORY.md + memory/ 日记 + memory_search | ✅ |
 | 工具记忆 | TOOLS.md 自动更新 | ✅ |
 | 推理展示 | thinking 浅色字体 + 最终 content 分离 | ✅ |
+| **前端流式性能优化** | SSE 节流（100ms 批量刷新）+ 自定义 Equatable + 图片异步解码 + 异步加载 | ✅ |
+| **对话全量持久化** | chat_logs 表：user_id / event_id / 对话原文 / 工具调用 / 文件指针 / 状态 | ✅ |
+| **内容安全过滤** | 0-chunk 检测 → filtered 事件 → 前端自动清洗上下文 + 后端保留审计记录 | ✅ |
 
 ### Phase 1 — 自主能力 + 基础备份（下一步）
 
@@ -1143,12 +1146,15 @@ RUN npx playwright install --with-deps chromium
 
 ## 19. 当前阶段实施优先级
 
-**已完成** ✅：
+**已完成** ✅（Phase 0）：
 1. ~~容器目录结构~~
 2. ~~多模态文件 inbox 机制~~
 3. ~~持久会话 + 记忆系统~~
 4. ~~推理过程/最终结果分离~~
 5. ~~TOOLS.md 自动维护~~
+6. ~~**前端流式性能优化**~~（✅ SSE 节流 100ms + 自定义 Equatable + 图片异步解码 + 异步加载）
+7. ~~**对话全量持久化**~~（✅ chat_logs 表：user/event_id/对话原文/工具调用/文件指针/状态）
+8. ~~**内容安全过滤**~~（✅ 0-chunk 检测 + filtered 事件 + 前端自动清洗 + 后端审计保留）
 
 **立即做**（Phase 1）：
 1. ~~**错误包装 + LLM 故障转移**~~（✅ 已完成：openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底）
