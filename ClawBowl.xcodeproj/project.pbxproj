@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		E11B32A62D5E000000000022 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = E11B32A62D5E000000000021 /* MarkdownUI */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		A11B32A62D5E00000000000D /* ClawBowl.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClawBowl.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E11B32A62D5E000000000022 /* MarkdownUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +70,7 @@
 			);
 			name = ClawBowl;
 			packageProductDependencies = (
+				E11B32A62D5E000000000021 /* MarkdownUI */,
 			);
 			productName = ClawBowl;
 			productReference = A11B32A62D5E00000000000D /* ClawBowl.app */;
@@ -95,6 +101,9 @@
 			);
 			mainGroup = A11B32A62D5E000000000002;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E11B32A62D5E000000000020 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A11B32A62D5E000000000004 /* Products */;
 			projectDirPath = "";
@@ -345,6 +354,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E11B32A62D5E000000000020 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/gonzalezreal/swift-markdown-ui";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.4.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		E11B32A62D5E000000000021 /* MarkdownUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E11B32A62D5E000000000020 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */;
+			productName = MarkdownUI;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A11B32A62D5E000000000001 /* Project object */;
 }

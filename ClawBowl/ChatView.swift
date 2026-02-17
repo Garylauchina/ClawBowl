@@ -358,6 +358,9 @@ struct ChatView: View {
                                 messages[idx].content += text  // 追加（后续）
                             }
                             scrollTrigger &+= 1
+                        case .file(let fileInfo):
+                            messages[idx].files.append(fileInfo)
+                            scrollTrigger &+= 1
                         case .filtered(let text):
                             messages[idx].content = text
                             messages[idx].thinkingText = ""

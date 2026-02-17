@@ -354,6 +354,82 @@ def _make_content_chunk(text: str) -> str:
     return f"data: {payload}\n\n"
 
 
+# ── Workspace snapshot / diff for file detection ─────────────────────
+
+# Directories excluded from workspace diff (agent internal files)
+_WS_EXCLUDE_DIRS = {"media/inbound", ".openclaw", ".git", "__pycache__", "memory", "skills"}
+_WS_EXCLUDE_PREFIXES = (".", "_")
+
+
+def _snapshot_workspace(workspace_dir: Path) -> dict[str, tuple[int, float]]:
+    """Take a snapshot of workspace files: {relative_path: (size, mtime)}.
+
+    Only includes regular files, excludes hidden/internal directories.
+    """
+    snapshot: dict[str, tuple[int, float]] = {}
+    if not workspace_dir.is_dir():
+        return snapshot
+    try:
+        for entry in workspace_dir.rglob("*"):
+            if not entry.is_file():
+                continue
+            rel = entry.relative_to(workspace_dir)
+            rel_str = str(rel)
+            # Skip excluded directories
+            parts = rel.parts
+            if any(p.startswith(".") or p.startswith("_") for p in parts[:-1]):
+                continue
+            if any(rel_str.startswith(d + "/") or rel_str.startswith(d + "\\") for d in _WS_EXCLUDE_DIRS):
+                continue
+            if rel_str in _WS_EXCLUDE_DIRS:
+                continue
+            try:
+                st = entry.stat()
+                snapshot[rel_str] = (st.st_size, st.st_mtime)
+            except OSError:
+                pass
+    except OSError:
+        logger.warning("Failed to snapshot workspace: %s", workspace_dir)
+    return snapshot
+
+
+def _diff_workspace(
+    before: dict[str, tuple[int, float]],
+    after: dict[str, tuple[int, float]],
+) -> list[dict]:
+    """Compare two snapshots, return list of new/modified file info dicts.
+
+    Returns list of: {"name": "chart.png", "path": "output/chart.png", "size": 12345, "type": "image/png"}
+    """
+    import mimetypes
+
+    new_files: list[dict] = []
+    for rel_path, (size, mtime) in after.items():
+        prev = before.get(rel_path)
+        if prev is None or prev != (size, mtime):
+            # New or modified file
+            name = Path(rel_path).name
+            mime_type, _ = mimetypes.guess_type(name)
+            if mime_type is None:
+                mime_type = "application/octet-stream"
+            new_files.append({
+                "name": name,
+                "path": rel_path,
+                "size": size,
+                "type": mime_type,
+            })
+    return new_files
+
+
+def _make_file_chunk(file_info: dict) -> str:
+    """Build an SSE line with a 'file' delta for file detection."""
+    payload = json.dumps(
+        {"choices": [{"delta": {"file": file_info}}]},
+        ensure_ascii=False,
+    )
+    return f"data: {payload}\n\n"
+
+
 _TURN_GAP_SECONDS = 3.0
 """时间间隔阈值（秒）：content chunk 之间超过此间隔视为新的 agent 轮次。
 
@@ -378,6 +454,10 @@ async def proxy_chat_stream(
     """
     messages = _preprocess_attachments(instance, messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream=True)
+
+    # Workspace snapshot before the stream (for file detection at end)
+    workspace_dir = Path(instance.data_path) / "workspace"
+    ws_before = _snapshot_workspace(workspace_dir)
 
     seen_tools: set[str] = set()
     content_buf: list[str] = []   # buffer content for current turn
@@ -430,10 +510,23 @@ async def proxy_chat_stream(
                                 final = "".join(content_buf).strip()
                                 if final:
                                     yield _make_content_chunk(final)
+
+                            # ── File detection: workspace diff ──
+                            ws_after = _snapshot_workspace(workspace_dir)
+                            new_files = _diff_workspace(ws_before, ws_after)
+                            if new_files:
+                                logger.info(
+                                    "Workspace diff: %d new/modified file(s)",
+                                    len(new_files),
+                                )
+                                for finfo in new_files:
+                                    yield _make_file_chunk(finfo)
+
                             yield "data: [DONE]\n\n"
                             logger.info(
-                                "SSE done: %d chunks, %d turns, %d tools",
+                                "SSE done: %d chunks, %d turns, %d tools, %d files",
                                 chunk_count, turn_count, len(seen_tools),
+                                len(new_files) if new_files else 0,
                             )
                             return
 

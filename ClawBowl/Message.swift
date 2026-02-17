@@ -26,6 +26,52 @@ struct Attachment: Equatable {
     }
 }
 
+// MARK: - FileInfo (Agent 生成的文件)
+
+/// Agent 在 workspace 中生成的文件信息（通过 SSE file 事件传递）
+struct FileInfo: Identifiable, Equatable, Codable {
+    let id: UUID
+    let name: String       // "chart.png"
+    let path: String       // "output/chart.png" (workspace 相对路径)
+    let size: Int          // bytes
+    let mimeType: String   // "image/png"
+
+    var isImage: Bool { mimeType.hasPrefix("image/") }
+
+    var formattedSize: String {
+        let bytes = Double(size)
+        if bytes < 1024 {
+            return "\(Int(bytes)) B"
+        } else if bytes < 1024 * 1024 {
+            return String(format: "%.1f KB", bytes / 1024)
+        } else {
+            return String(format: "%.1f MB", bytes / (1024 * 1024))
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, path, size
+        case mimeType = "type"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = UUID()
+        self.name = try container.decode(String.self, forKey: .name)
+        self.path = try container.decode(String.self, forKey: .path)
+        self.size = try container.decode(Int.self, forKey: .size)
+        self.mimeType = try container.decode(String.self, forKey: .mimeType)
+    }
+
+    init(name: String, path: String, size: Int, mimeType: String) {
+        self.id = UUID()
+        self.name = name
+        self.path = path
+        self.size = size
+        self.mimeType = mimeType
+    }
+}
+
 // MARK: - Message
 
 /// 聊天消息模型
@@ -41,6 +87,8 @@ struct Message: Identifiable, Equatable {
     var thinkingText: String
     /// 是否正在流式接收内容
     var isStreaming: Bool
+    /// Agent 在 workspace 中生成的文件列表（通过 SSE file 事件检测）
+    var files: [FileInfo]
 
     enum Role: String, Codable {
         case user
@@ -60,7 +108,8 @@ struct Message: Identifiable, Equatable {
         attachment: Attachment? = nil,
         status: Status = .sent,
         thinkingText: String = "",
-        isStreaming: Bool = false
+        isStreaming: Bool = false,
+        files: [FileInfo] = []
     ) {
         self.id = UUID()
         self.role = role
@@ -70,12 +119,15 @@ struct Message: Identifiable, Equatable {
         self.status = status
         self.thinkingText = thinkingText
         self.isStreaming = isStreaming
+        self.files = files
     }
 
     /// 是否包含附件
     var hasAttachment: Bool { attachment != nil }
     /// 是否包含图片附件
     var hasImage: Bool { attachment?.isImage ?? false }
+    /// 是否包含 Agent 生成的文件
+    var hasFiles: Bool { !files.isEmpty }
 }
 
 // MARK: - Message Persistence
@@ -256,4 +308,6 @@ struct StreamDelta: Decodable {
     let thinking: String?
     /// 内容安全过滤标记（后端检测到 0-chunk 空响应时设为 true）
     let filtered: Bool?
+    /// Agent 生成的文件信息（workspace diff 检测后注入）
+    let file: FileInfo?
 }

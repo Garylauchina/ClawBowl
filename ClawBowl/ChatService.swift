@@ -9,6 +9,8 @@ enum StreamEvent {
     case content(String)
     /// 内容被安全审核过滤（0-chunk 空响应）
     case filtered(String)
+    /// Agent 生成的文件（workspace diff 检测）
+    case file(FileInfo)
     /// 流结束
     case done
 }
@@ -172,6 +174,12 @@ actor ChatService {
                         // Content safety filter (0-chunk empty response)
                         if delta.filtered == true, let text = delta.content {
                             continuation.yield(.filtered(text))
+                            continue
+                        }
+
+                        // File event (workspace diff detection)
+                        if let fileInfo = delta.file {
+                            continuation.yield(.file(fileInfo))
                             continue
                         }
 

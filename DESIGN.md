@@ -654,6 +654,42 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 - 按 user_id + 时间范围统计对话量/token 消耗
 - 为记忆梳理机制提供原始语料库（自动提取关键信息 → MEMORY.md）
 
+### 10.4 文件下载与 Workspace Diff
+
+> 更新：2026-02-17。实现 Agent 生成文件 → 用户手机的完整链路。
+
+**后端实现：**
+
+1. **下载 API**：`GET /api/v2/files/download?path={relative_path}`
+   - JWT 鉴权 + `is_relative_to()` 路径穿越防护
+   - 自动推断 MIME type + FileResponse 流式返回
+2. **Workspace Diff**：`proxy_chat_stream()` 在 SSE 流开始前快照 workspace 目录（文件名+size+mtime），`[DONE]` 之前再次扫描，对比找出新增/修改文件
+3. **SSE File 事件注入**：新增/修改的文件以 `{"choices":[{"delta":{"file":{...}}}]}` 格式注入 SSE 流末尾
+4. **排除规则**：`media/inbound/`（用户上传）、`memory/`、`skills/`、隐藏文件/目录
+
+**前端实现：**
+
+| 组件 | 职责 |
+|------|------|
+| `FileInfo` 模型 | workspace 文件元数据（name/path/size/mimeType），支持 Codable |
+| `StreamEvent.file` | SSE 解析层新增的文件事件 case |
+| `FileDownloader` actor | 文件下载 + 图片内存缓存 + JWT header 注入 |
+| `FileCardView` | 图片 → AsyncImage 内联展示；非图片 → SF Symbol + 文件名 + 大小卡片 |
+| `FilePreviewSheet` | QLPreviewController 封装，支持 PDF/Office/图片/音视频预览 |
+| `ShareSheet` | UIActivityViewController 封装，支持保存到手机/分享 |
+
+### 10.5 对话区 Markdown 富文本渲染
+
+> 更新：2026-02-17。将 AI 回复从纯文本升级为 Markdown 渲染。
+
+- **依赖**：[MarkdownUI](https://github.com/gonzalezreal/swift-markdown-ui) 2.4.1（SPM）
+- **渲染范围**：仅 assistant 消息渲染 Markdown，用户消息保持纯文本
+- **自定义主题** `clawBowlAssistant`：
+  - 文本 16pt + primary 颜色，代码块 monospaced 等宽字体 + 灰色背景 + 横向滚动
+  - 标题 H1/H2/H3 差异化字号，引用块左侧竖线 + 斜体
+  - 链接蓝色可点击
+- **流式兼容**：当前 proxy 将整轮 content 在 `finish_reason: "stop"` 时一次性发送，不存在 partial markdown 问题
+
 ---
 
 ## 11. OpenClaw 能力清单
@@ -1128,7 +1164,8 @@ ZenMux 是 ClawBowl 当前的 LLM 聚合层，通过统一的 OpenAI 兼容接�
 
 | 能力 | 实现方式 | 前端改动 | 后端改动 | 优先级 |
 |---|---|---|---|---|
-| **文件下载** | 下载 API + SSE file 事件（详见 8.4） | FileCardView + 预览/分享 | `/api/v2/files/download` + workspace diff | ⭐⭐⭐ |
+| ~~**文件下载**~~ | 下载 API + SSE file 事件（详见 8.4） | FileCardView + 预览/分享 | `/api/v2/files/download` + workspace diff | ✅ 已完成 |
+| ~~**对话区富内容展示**~~ | MarkdownUI 渲染 + 图片内联 + 文件卡片 | Markdown 主题 + FileCardView + FileDownloader | SSE file delta 注入 | ✅ 已完成 |
 | **基础 Snapshot** | tar.zst + manifest.json（详见第 6 章） | 无 | 定时任务 + 控制面 API | ⭐⭐⭐ |
 | **Cron 定时任务** | 启用 cron 工具 + HEARTBEAT.md | 添加"定时任务"管理 UI | openclaw.json 启用 cron | ⭐⭐⭐ |
 | **Heartbeat 心跳** | 配置 heartbeat 周期 | 无（后台自动） | HEARTBEAT.md 配置检查项 | ⭐⭐⭐ |
@@ -1237,8 +1274,9 @@ RUN npx playwright install --with-deps chromium
 
 **立即做**（Phase 1）：
 1. ~~**错误包装 + LLM 故障转移**~~（✅ 已完成：openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底）
-2. **文件下载功能**（后端 API + 前端文件卡片 + 预览/分享）
-3. **Stop 按钮**（前端即停，后端异步清理）
+2. ~~**文件下载功能**~~（✅ 已完成：下载 API + workspace diff + SSE file 事件 + FileCardView + QLPreview + ShareSheet）
+3. ~~**对话区富内容展示**~~（✅ 已完成：MarkdownUI 渲染 + 图片内联 + 文件卡片 + 自定义主题）
+4. **Stop 按钮**（前端即停，后端异步清理）
 4. ~~**修复对话区刷新空白 Bug**~~（✅ 已修复：Ready Gate 机制，UI ready 后才发请求）
 5. ~~**滚动到底部浮动按钮**~~（✅ 已完成：底部锚点 onAppear/onDisappear + 浮动箭头按钮）
 6. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
