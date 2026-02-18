@@ -186,13 +186,27 @@ struct FileCardView: View {
 
     private func loadImageAsync() async {
         guard loadPhase != .loaded else { return }
+        loadPhase = .loading
 
+        // Priority 1: Use inline base64 data from SSE (bypasses CDN entirely)
+        if let b64 = file.inlineData, !b64.isEmpty {
+            if let rawData = Data(base64Encoded: b64), let image = UIImage(data: rawData) {
+                await FileDownloader.shared.cacheImage(image, forPath: file.path)
+                downloadedImage = image
+                loadPhase = .loaded
+                debugInfo = "inline:\(rawData.count)b ok"
+                return
+            } else {
+                debugInfo = "inline:decode_fail"
+            }
+        }
+
+        // Priority 2: Download via API (fallback)
         for attempt in 1...3 {
             loadPhase = .loading
-
             do {
                 let data = try await FileDownloader.shared.downloadFileData(path: file.path)
-                debugInfo = "data:\(data.count)b"
+                debugInfo = "dl:\(data.count)b"
                 if let image = UIImage(data: data) {
                     await FileDownloader.shared.cacheImage(image, forPath: file.path)
                     downloadedImage = image

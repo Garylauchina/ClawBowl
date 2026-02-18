@@ -437,13 +437,18 @@ def _snapshot_workspace(workspace_dir: Path) -> dict[str, tuple[int, float]]:
     return snapshot
 
 
+_IMAGE_INLINE_MAX_BYTES = 512 * 1024  # inline base64 for images ≤ 512 KB
+
+
 def _diff_workspace(
     before: dict[str, tuple[int, float]],
     after: dict[str, tuple[int, float]],
+    workspace_dir: Path,
 ) -> list[dict]:
     """Compare two snapshots, return list of new/modified file info dicts.
 
-    Returns list of: {"name": "chart.png", "path": "output/chart.png", "size": 12345, "type": "image/png"}
+    For images ≤ 512 KB, includes base64-encoded ``data`` field so the
+    frontend can render without a separate download (bypasses CDN issues).
     """
     import mimetypes
 
@@ -451,17 +456,29 @@ def _diff_workspace(
     for rel_path, (size, mtime) in after.items():
         prev = before.get(rel_path)
         if prev is None or prev != (size, mtime):
-            # New or modified file
             name = Path(rel_path).name
             mime_type, _ = mimetypes.guess_type(name)
             if mime_type is None:
                 mime_type = "application/octet-stream"
-            new_files.append({
+            info: dict = {
                 "name": name,
                 "path": rel_path,
                 "size": size,
                 "type": mime_type,
-            })
+            }
+            # Inline image data as base64 to bypass CDN blocking
+            if (
+                mime_type
+                and mime_type.startswith("image/")
+                and size <= _IMAGE_INLINE_MAX_BYTES
+            ):
+                try:
+                    full_path = workspace_dir / rel_path
+                    raw = full_path.read_bytes()
+                    info["data"] = base64.b64encode(raw).decode("ascii")
+                except OSError:
+                    pass
+            new_files.append(info)
     return new_files
 
 
@@ -558,7 +575,7 @@ async def proxy_chat_stream(
 
                             # ── File detection: workspace diff ──
                             ws_after = _snapshot_workspace(workspace_dir)
-                            new_files = _diff_workspace(ws_before, ws_after)
+                            new_files = _diff_workspace(ws_before, ws_after, workspace_dir)
                             if new_files:
                                 logger.info(
                                     "Workspace diff: %d new/modified file(s): %s",

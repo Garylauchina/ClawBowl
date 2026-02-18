@@ -35,6 +35,8 @@ struct FileInfo: Identifiable, Equatable, Codable {
     let path: String       // "output/chart.png" (workspace 相对路径)
     let size: Int          // bytes
     let mimeType: String   // "image/png"
+    /// Base64-encoded image data (inline from SSE, bypasses CDN download)
+    let inlineData: String?
 
     var isImage: Bool { mimeType.hasPrefix("image/") }
 
@@ -52,6 +54,7 @@ struct FileInfo: Identifiable, Equatable, Codable {
     enum CodingKeys: String, CodingKey {
         case name, path, size
         case mimeType = "type"
+        case inlineData = "data"
     }
 
     init(from decoder: Decoder) throws {
@@ -61,14 +64,16 @@ struct FileInfo: Identifiable, Equatable, Codable {
         self.path = try container.decode(String.self, forKey: .path)
         self.size = try container.decode(Int.self, forKey: .size)
         self.mimeType = try container.decode(String.self, forKey: .mimeType)
+        self.inlineData = try container.decodeIfPresent(String.self, forKey: .inlineData)
     }
 
-    init(name: String, path: String, size: Int, mimeType: String) {
+    init(name: String, path: String, size: Int, mimeType: String, inlineData: String? = nil) {
         self.id = UUID()
         self.name = name
         self.path = path
         self.size = size
         self.mimeType = mimeType
+        self.inlineData = inlineData
     }
 }
 

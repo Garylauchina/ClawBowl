@@ -67,7 +67,7 @@ actor FileDownloader {
 
     // MARK: - Raw Data Download
 
-    /// 下载文件原始数据（含 401 自动刷新重试）
+    /// 下载文件原始数据（token 放在 URL 参数中，绕过 Cloudflare header 干扰）
     func downloadFileData(path: String) async throws -> Data {
         for attempt in 0..<2 {
             guard let token = await AuthService.shared.accessToken else {
@@ -75,14 +75,16 @@ actor FileDownloader {
             }
 
             var components = URLComponents(string: baseURL)!
-            components.queryItems = [URLQueryItem(name: "path", value: path)]
+            components.queryItems = [
+                URLQueryItem(name: "path", value: path),
+                URLQueryItem(name: "token", value: token),
+            ]
 
             guard let url = components.url else {
                 throw FileDownloadError.invalidURL
             }
 
             var request = URLRequest(url: url)
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             request.cachePolicy = .reloadIgnoringLocalCacheData
             request.timeoutInterval = 60
 
@@ -93,6 +95,10 @@ actor FileDownloader {
             }
 
             if http.statusCode == 200 {
+                let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
+                if contentType.contains("text/html") {
+                    throw FileDownloadError.blockedByProxy
+                }
                 return data
             }
 
@@ -137,6 +143,7 @@ enum FileDownloadError: LocalizedError {
     case invalidURL
     case invalidResponse
     case fileNotFound
+    case blockedByProxy
     case httpError(Int)
 
     var errorDescription: String? {
@@ -145,6 +152,7 @@ enum FileDownloadError: LocalizedError {
         case .invalidURL: return "无效的下载地址"
         case .invalidResponse: return "服务器响应异常"
         case .fileNotFound: return "文件不存在"
+        case .blockedByProxy: return "CDN 拦截，请重试"
         case .httpError(let code): return "下载失败 (\(code))"
         }
     }
