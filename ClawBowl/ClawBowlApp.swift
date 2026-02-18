@@ -1,4 +1,4 @@
-@preconcurrency import SwiftUI
+import SwiftUI
 
 @main
 struct ClawBowlApp: App {
@@ -18,7 +18,7 @@ struct ClawBowlApp: App {
                 } else if authService.isAuthenticated {
                     // ── 正常聊天界面（原始布局，无任何外层包裹）──
                     ChatView()
-                        .environment(\.authService, authService)
+                        .environmentObject(authService)
                 } else {
                     AuthView(authService: authService)
                 }
@@ -203,15 +203,3 @@ struct SplashView: View {
     }
 }
 
-// MARK: - Environment Key
-
-private struct AuthServiceKey: EnvironmentKey {
-    static let defaultValue: AuthService = AuthService.shared
-}
-
-extension EnvironmentValues {
-    var authService: AuthService {
-        get { self[AuthServiceKey.self] }
-        set { self[AuthServiceKey.self] = newValue }
-    }
-}

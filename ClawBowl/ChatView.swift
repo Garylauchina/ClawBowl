@@ -92,7 +92,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
 
 /// 聊天主视图
 struct ChatView: View {
-    @Environment(\.authService) private var authService
+    @EnvironmentObject private var authService: AuthService
     @State private var messages: [Message] = {
         if let saved = MessageStore.load() {
             return saved
