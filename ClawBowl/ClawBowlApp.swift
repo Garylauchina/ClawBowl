@@ -206,7 +206,7 @@ struct SplashView: View {
 // MARK: - Environment Key
 
 private struct AuthServiceKey: EnvironmentKey {
-    @MainActor static let defaultValue: AuthService = AuthService.shared
+    static let defaultValue: AuthService = AuthService.shared
 }
 
 extension EnvironmentValues {

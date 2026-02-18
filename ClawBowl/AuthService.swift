@@ -58,7 +58,7 @@ private enum KeychainHelper {
 /// 用户认证服务 – 处理注册、登录、JWT token 管理
 @MainActor
 class AuthService: ObservableObject {
-    static let shared = AuthService()
+    nonisolated(unsafe) static let shared = AuthService()
 
     @Published var isAuthenticated = false
     @Published var currentUserId: String?

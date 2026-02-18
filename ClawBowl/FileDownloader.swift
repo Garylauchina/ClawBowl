@@ -69,7 +69,7 @@ actor FileDownloader {
 
     /// 下载文件原始数据
     func downloadFileData(path: String) async throws -> Data {
-        guard let token = AuthService.shared.accessToken else {
+        guard let token = await AuthService.shared.accessToken else {
             throw FileDownloadError.notAuthenticated
         }
 
