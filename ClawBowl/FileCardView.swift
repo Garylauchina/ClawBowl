@@ -92,6 +92,11 @@ struct FileCardView: View {
         .task(id: file.path) {
             await loadImageAsync()
         }
+        .onAppear {
+            if downloadedImage == nil, loadPhase != .loading {
+                Task { await loadImageAsync() }
+            }
+        }
         .fullScreenCover(isPresented: $showFullScreen) {
             FullScreenImageViewer(image: downloadedImage, title: file.name)
         }
@@ -169,22 +174,26 @@ struct FileCardView: View {
         }
     }
 
-    // MARK: - Async Image Loading (structured task — cancelled on view removal)
+    // MARK: - Async Image Loading
 
     private func loadImageAsync() async {
         guard loadPhase != .loaded else { return }
-        loadPhase = .loading
 
-        do {
-            let image = try await FileDownloader.shared.downloadImage(path: file.path)
-            if !Task.isCancelled {
+        for attempt in 1...3 {
+            loadPhase = .loading
+
+            do {
+                let image = try await FileDownloader.shared.downloadImage(path: file.path)
                 downloadedImage = image
                 loadPhase = image != nil ? .loaded : .failed
-            }
-        } catch {
-            if !Task.isCancelled {
+                if loadPhase == .loaded { return }
+            } catch {
                 loadPhase = .failed
             }
+
+            guard attempt < 3 else { break }
+            try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000)
+            if Task.isCancelled { return }
         }
     }
 

@@ -21,6 +21,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -265,6 +266,21 @@ def _preprocess_attachments(
 _REQ_TIMEOUT = httpx.Timeout(connect=30, read=300, write=30, pool=30)
 
 
+def _inject_date_context(messages: list[dict]) -> list[dict]:
+    """Prepend a system message with the current date/time so the Agent
+    has accurate temporal awareness."""
+    now = datetime.now(timezone.utc)
+    date_msg = {
+        "role": "system",
+        "content": (
+            f"Current date and time: {now.strftime('%Y-%m-%d %H:%M UTC')} "
+            f"({now.strftime('%A')}). "
+            "Use this as the reference for any time-related queries."
+        ),
+    }
+    return [date_msg] + messages
+
+
 def _build_request_parts(
     instance: OpenClawInstance,
     messages: list[dict],
@@ -305,6 +321,7 @@ async def proxy_chat_request(
 ) -> dict:
     """Forward a chat completion request to the user's OpenClaw gateway (non-streaming)."""
     messages = _preprocess_attachments(instance, messages)
+    messages = _inject_date_context(messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream)
 
     # Retry once on connection errors (gateway may still be warming up)
@@ -357,37 +374,45 @@ def _make_content_chunk(text: str) -> str:
 # ── Workspace snapshot / diff for file detection ─────────────────────
 
 # Directories excluded from workspace diff (agent internal files)
-_WS_EXCLUDE_DIRS = {"media/inbound", ".openclaw", ".git", "__pycache__", "memory", "skills"}
+_WS_EXCLUDE_DIRS = {
+    "media/inbound", ".openclaw", ".git", "__pycache__", "memory", "skills",
+    "excel_env", "venv", "env", ".venv", "node_modules", "lib",
+}
 _WS_EXCLUDE_PREFIXES = (".", "_")
 
 
 def _snapshot_workspace(workspace_dir: Path) -> dict[str, tuple[int, float]]:
     """Take a snapshot of workspace files: {relative_path: (size, mtime)}.
 
-    Only includes regular files, excludes hidden/internal directories.
+    Uses os.walk with directory pruning for performance — skips excluded dirs
+    entirely without traversing their contents.
     """
+    import os
+
     snapshot: dict[str, tuple[int, float]] = {}
     if not workspace_dir.is_dir():
         return snapshot
+    ws_str = str(workspace_dir)
     try:
-        for entry in workspace_dir.rglob("*"):
-            if not entry.is_file():
-                continue
-            rel = entry.relative_to(workspace_dir)
-            rel_str = str(rel)
-            # Skip excluded directories
-            parts = rel.parts
-            if any(p.startswith(".") or p.startswith("_") for p in parts[:-1]):
-                continue
-            if any(rel_str.startswith(d + "/") or rel_str.startswith(d + "\\") for d in _WS_EXCLUDE_DIRS):
-                continue
-            if rel_str in _WS_EXCLUDE_DIRS:
-                continue
-            try:
-                st = entry.stat()
-                snapshot[rel_str] = (st.st_size, st.st_mtime)
-            except OSError:
-                pass
+        for dirpath, dirnames, filenames in os.walk(workspace_dir):
+            rel_dir = os.path.relpath(dirpath, ws_str)
+            # Prune excluded subdirectories in-place (prevents os.walk from descending)
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in _WS_EXCLUDE_DIRS
+                and not d.startswith(".")
+                and not d.startswith("_")
+            ]
+            for fname in filenames:
+                if fname.startswith("."):
+                    continue
+                rel_path = fname if rel_dir == "." else f"{rel_dir}/{fname}"
+                full = os.path.join(dirpath, fname)
+                try:
+                    st = os.stat(full)
+                    snapshot[rel_path] = (st.st_size, st.st_mtime)
+                except OSError:
+                    pass
     except OSError:
         logger.warning("Failed to snapshot workspace: %s", workspace_dir)
     return snapshot
@@ -453,6 +478,7 @@ async def proxy_chat_stream(
     5. 客户端收到 content → 清除 thinking，只保留最终结果
     """
     messages = _preprocess_attachments(instance, messages)
+    messages = _inject_date_context(messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream=True)
 
     # Workspace snapshot before the stream (for file detection at end)
@@ -516,8 +542,9 @@ async def proxy_chat_stream(
                             new_files = _diff_workspace(ws_before, ws_after)
                             if new_files:
                                 logger.info(
-                                    "Workspace diff: %d new/modified file(s)",
+                                    "Workspace diff: %d new/modified file(s): %s",
                                     len(new_files),
+                                    ", ".join(f"{f['name']}({f['size']}b)" for f in new_files),
                                 )
                                 for finfo in new_files:
                                     yield _make_file_chunk(finfo)
