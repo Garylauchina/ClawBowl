@@ -89,53 +89,57 @@ async def _logged_stream(
     tool_calls: list[dict[str, Any]] = []
     log_status = "success"
 
-    async for chunk in generator:
-        yield chunk
+    try:
+        async for chunk in generator:
+            yield chunk
 
-        # Parse SSE line for logging (best-effort, never block streaming)
-        if not chunk.startswith("data: ") or chunk.startswith("data: [DONE]"):
-            continue
-        try:
-            payload = json.loads(chunk[6:])
-            choices = payload.get("choices") or []
-            for choice in choices:
-                delta = choice.get("delta") or {}
-                if delta.get("filtered"):
-                    log_status = "filtered"
-                if delta.get("content"):
-                    content_parts.append(delta["content"])
-                if delta.get("thinking"):
-                    thinking_parts.append(delta["thinking"])
-                # Capture tool_calls from the original OpenClaw response
-                if delta.get("tool_calls"):
-                    for tc in delta["tool_calls"]:
-                        func = tc.get("function") or {}
-                        tool_calls.append({
-                            "name": func.get("name", ""),
-                            "arguments": func.get("arguments", ""),
-                        })
-                fr = choice.get("finish_reason")
-                if fr and fr != "stop" and fr != "tool_calls":
-                    log_status = "error"
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass
+            # Parse SSE line for logging (best-effort, never block streaming)
+            if not chunk.startswith("data: ") or chunk.startswith("data: [DONE]"):
+                continue
+            try:
+                payload = json.loads(chunk[6:])
+                choices = payload.get("choices") or []
+                for choice in choices:
+                    delta = choice.get("delta") or {}
+                    if delta.get("filtered"):
+                        log_status = "filtered"
+                    if delta.get("content"):
+                        content_parts.append(delta["content"])
+                    if delta.get("thinking"):
+                        thinking_parts.append(delta["thinking"])
+                    if delta.get("tool_calls"):
+                        for tc in delta["tool_calls"]:
+                            func = tc.get("function") or {}
+                            tool_calls.append({
+                                "name": func.get("name", ""),
+                                "arguments": func.get("arguments", ""),
+                            })
+                    fr = choice.get("finish_reason")
+                    if fr and fr != "stop" and fr != "tool_calls":
+                        log_status = "error"
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+    except Exception:
+        if log_status == "success":
+            log_status = "interrupted"
+        logger.warning("SSE stream interrupted for event %s", event_id)
+    finally:
+        # Always persist — even if client disconnected mid-stream
+        full_content = "".join(content_parts)
+        full_thinking = "".join(thinking_parts) or None
+        if not full_content and log_status == "success":
+            log_status = "error"
 
-    # Stream finished — persist assistant response
-    full_content = "".join(content_parts)
-    full_thinking = "".join(thinking_parts) or None
-    if not full_content and log_status == "success":
-        log_status = "error"
-
-    await _save_log(
-        user_id=user_id,
-        event_id=event_id,
-        role="assistant",
-        content=full_content,
-        thinking_text=full_thinking,
-        tool_calls=tool_calls if tool_calls else None,
-        log_status=log_status,
-        model=model,
-    )
+        await _save_log(
+            user_id=user_id,
+            event_id=event_id,
+            role="assistant",
+            content=full_content,
+            thinking_text=full_thinking,
+            tool_calls=tool_calls if tool_calls else None,
+            log_status=log_status,
+            model=model,
+        )
 
 
 # ── Endpoints ────────────────────────────────────────────────────────

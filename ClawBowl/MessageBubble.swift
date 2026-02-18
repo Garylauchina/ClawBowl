@@ -90,7 +90,7 @@ struct MessageBubble: View {
                 }
                 .padding(.horizontal, 4)
             }
-            .frame(maxWidth: 280, alignment: message.role == .user ? .trailing : .leading)
+            .frame(maxWidth: message.hasFiles ? 300 : 280, alignment: message.role == .user ? .trailing : .leading)
 
             if message.role == .user {
                 avatarView(text: "我", colors: [.blue, .cyan])

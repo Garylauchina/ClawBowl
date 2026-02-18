@@ -1,16 +1,19 @@
 import SwiftUI
 
-/// Agent 生成的文件展示组件 — 图片内联展示，其他文件显示为卡片
+/// Agent 生成的文件展示组件 — 图片内联展示缩略图，其他文件显示为卡片
 struct FileCardView: View {
     let file: FileInfo
 
     @State private var downloadedImage: UIImage?
-    @State private var isLoadingImage = false
+    @State private var loadPhase: LoadPhase = .idle
     @State private var previewURL: URL?
     @State private var showPreview = false
     @State private var showShare = false
-    @State private var isDownloading = false
-    @State private var downloadError: String?
+    @State private var showFullScreen = false
+
+    private enum LoadPhase {
+        case idle, loading, loaded, failed
+    }
 
     var body: some View {
         if file.isImage {
@@ -20,70 +23,94 @@ struct FileCardView: View {
         }
     }
 
-    // MARK: - Image (inline display)
+    // MARK: - Image (inline thumbnail + tap for fullscreen)
 
     @ViewBuilder
     private var imageView: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let image = downloadedImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: 280, maxHeight: 280)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .onTapGesture { downloadForPreview() }
-                    .contextMenu {
-                        Button {
-                            UIPasteboard.general.image = image
-                        } label: {
-                            Label("复制图片", systemImage: "doc.on.doc")
-                        }
-                        Button { downloadForShare() } label: {
-                            Label("保存到手机", systemImage: "square.and.arrow.down")
-                        }
+            Group {
+                switch loadPhase {
+                case .loaded:
+                    if let image = downloadedImage {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 260, maxHeight: 260)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .contentShape(Rectangle())
+                            .onTapGesture { showFullScreen = true }
+                            .contextMenu {
+                                Button {
+                                    UIPasteboard.general.image = image
+                                } label: {
+                                    Label("复制图片", systemImage: "doc.on.doc")
+                                }
+                                Button { downloadForShare() } label: {
+                                    Label("保存到手机", systemImage: "square.and.arrow.down")
+                                }
+                            }
                     }
-            } else if isLoadingImage {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(.systemGray5))
-                    .frame(width: 160, height: 120)
-                    .overlay {
-                        ProgressView()
-                    }
-            } else {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(.systemGray5))
-                    .frame(width: 160, height: 120)
-                    .overlay {
-                        VStack(spacing: 4) {
-                            Image(systemName: "photo")
-                                .font(.title2)
-                                .foregroundStyle(.secondary)
-                            Text(file.name)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+
+                case .loading:
+                    thumbnailPlaceholder(showSpinner: true)
+
+                case .failed:
+                    thumbnailPlaceholder(showSpinner: false)
+                        .overlay {
+                            VStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .font(.title3)
+                                    .foregroundStyle(.secondary)
+                                Text("加载失败，点击重试")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                    }
-                    .onTapGesture { loadImage() }
+                        .onTapGesture { loadPhase = .idle }
+
+                case .idle:
+                    thumbnailPlaceholder(showSpinner: false)
+                        .overlay {
+                            VStack(spacing: 4) {
+                                Image(systemName: "photo")
+                                    .font(.title2)
+                                    .foregroundStyle(.secondary)
+                                Text(file.name)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                }
             }
 
-            if let error = downloadError {
-                Text(error)
-                    .font(.caption2)
-                    .foregroundColor(.red)
-            }
+            Text("\(file.name) · \(file.formattedSize)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
         }
-        .task { loadImage() }
-        .sheet(isPresented: $showPreview) {
-            if let url = previewURL {
-                FilePreviewSheet(url: url)
-            }
+        .task(id: file.path) {
+            await loadImageAsync()
+        }
+        .fullScreenCover(isPresented: $showFullScreen) {
+            FullScreenImageViewer(image: downloadedImage, title: file.name)
         }
         .sheet(isPresented: $showShare) {
             if let url = previewURL {
                 ShareSheet(items: [url])
             }
         }
+    }
+
+    private func thumbnailPlaceholder(showSpinner: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 10)
+            .fill(Color(.systemGray5))
+            .frame(width: 160, height: 120)
+            .overlay {
+                if showSpinner {
+                    ProgressView()
+                }
+            }
     }
 
     // MARK: - File Card (non-image)
@@ -107,7 +134,7 @@ struct FileCardView: View {
 
             Spacer()
 
-            if isDownloading {
+            if loadPhase == .loading {
                 ProgressView()
                     .scaleEffect(0.8)
             }
@@ -142,81 +169,69 @@ struct FileCardView: View {
         }
     }
 
-    // MARK: - Download Actions
+    // MARK: - Async Image Loading (structured task — cancelled on view removal)
 
-    private func loadImage() {
-        guard downloadedImage == nil, !isLoadingImage else { return }
-        isLoadingImage = true
-        downloadError = nil
+    private func loadImageAsync() async {
+        guard loadPhase != .loaded else { return }
+        loadPhase = .loading
 
-        Task {
-            do {
-                let image = try await FileDownloader.shared.downloadImage(path: file.path)
-                await MainActor.run {
-                    downloadedImage = image
-                    isLoadingImage = false
-                }
-            } catch {
-                await MainActor.run {
-                    isLoadingImage = false
-                    downloadError = "加载失败"
-                }
+        do {
+            let image = try await FileDownloader.shared.downloadImage(path: file.path)
+            if !Task.isCancelled {
+                downloadedImage = image
+                loadPhase = image != nil ? .loaded : .failed
+            }
+        } catch {
+            if !Task.isCancelled {
+                loadPhase = .failed
             }
         }
     }
 
+    // MARK: - Download Actions
+
     private func downloadForPreview() {
-        guard !isDownloading else { return }
+        guard loadPhase != .loading else { return }
 
         if previewURL != nil {
             showPreview = true
             return
         }
 
-        isDownloading = true
+        loadPhase = .loading
         Task {
             do {
                 let url = try await FileDownloader.shared.downloadToTemp(
                     path: file.path, filename: file.name
                 )
-                await MainActor.run {
-                    previewURL = url
-                    isDownloading = false
-                    showPreview = true
-                }
+                previewURL = url
+                loadPhase = .idle
+                showPreview = true
             } catch {
-                await MainActor.run {
-                    isDownloading = false
-                    downloadError = "下载失败"
-                }
+                loadPhase = .failed
             }
         }
     }
 
     private func downloadForShare() {
-        guard !isDownloading else { return }
+        guard loadPhase != .loading else { return }
 
         if previewURL != nil {
             showShare = true
             return
         }
 
-        isDownloading = true
+        loadPhase = .loading
         Task {
             do {
                 let url = try await FileDownloader.shared.downloadToTemp(
                     path: file.path, filename: file.name
                 )
-                await MainActor.run {
-                    previewURL = url
-                    isDownloading = false
-                    showShare = true
-                }
+                previewURL = url
+                loadPhase = .idle
+                showShare = true
             } catch {
-                await MainActor.run {
-                    isDownloading = false
-                    downloadError = "下载失败"
-                }
+                loadPhase = .failed
             }
         }
     }
