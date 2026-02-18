@@ -131,9 +131,9 @@ struct FullScreenImageViewer: View {
     }
 
     private var magnificationGesture: some Gesture {
-        MagnifyGesture()
+        MagnificationGesture()
             .onChanged { value in
-                let newScale = lastScale * value.magnification
+                let newScale = lastScale * value
                 scale = min(max(newScale, 0.5), 5.0)
             }
             .onEnded { _ in
