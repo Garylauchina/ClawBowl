@@ -1,4 +1,4 @@
-import SwiftUI
+@preconcurrency import SwiftUI
 
 @main
 struct ClawBowlApp: App {
@@ -205,7 +205,7 @@ struct SplashView: View {
 
 // MARK: - Environment Key
 
-private struct AuthServiceKey: @preconcurrency EnvironmentKey {
+private struct AuthServiceKey: EnvironmentKey {
     static let defaultValue: AuthService = AuthService.shared
 }
 
