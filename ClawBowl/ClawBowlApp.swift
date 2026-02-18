@@ -205,6 +205,7 @@ struct SplashView: View {
 
 // MARK: - Environment Key
 
+@preconcurrency
 private struct AuthServiceKey: EnvironmentKey {
     static let defaultValue: AuthService = AuthService.shared
 }
