@@ -1,6 +1,6 @@
 # ClawBowl 系统设计文档（V5）
 
-> 最后更新：2026-02-17
+> 最后更新：2026-02-18
 
 ---
 
@@ -656,25 +656,41 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 
 ### 10.4 文件下载与 Workspace Diff
 
-> 更新：2026-02-17。实现 Agent 生成文件 → 用户手机的完整链路。
+> 更新：2026-02-18。实现 Agent 生成文件 → 用户手机的完整链路。
 
 **后端实现：**
 
-1. **下载 API**：`GET /api/v2/files/download?path={relative_path}`
-   - JWT 鉴权 + `is_relative_to()` 路径穿越防护
-   - 自动推断 MIME type + FileResponse 流式返回
+1. **下载 API**：`GET /api/v2/files/download?path={relative_path}&token={jwt}`
+   - 支持 URL 参数 token（主）和 Authorization header（备），兼容 CDN 场景
+   - `is_relative_to()` 路径穿越防护 + 自动推断 MIME type + FileResponse 流式返回
 2. **Workspace Diff**：`proxy_chat_stream()` 在 SSE 流开始前快照 workspace 目录（文件名+size+mtime），`[DONE]` 之前再次扫描，对比找出新增/修改文件
+   - 使用 `os.walk` + 目录剪枝（排除 `venv/node_modules/__pycache__` 等），性能从 1069ms 降至 1.1ms
 3. **SSE File 事件注入**：新增/修改的文件以 `{"choices":[{"delta":{"file":{...}}}]}` 格式注入 SSE 流末尾
-4. **排除规则**：`media/inbound/`（用户上传）、`memory/`、`skills/`、隐藏文件/目录
+4. **图片内联 Base64**：对 ≤512KB 的图片文件，在 SSE file 事件中嵌入 base64 编码的完整图片数据（`data` 字段），前端无需额外下载
+5. **排除规则**：`media/inbound/`（用户上传）、`memory/`、`skills/`、隐藏文件/目录
+
+**CDN 兼容性设计：**
+
+```
+问题：Cloudflare/DNSPod 对 GET 文件下载请求返回 HTML 屏蔽页（<!DOCTYPE...），
+     而非转发后端的二进制响应。POST 请求（SSE 流）不受影响。
+
+诊断依据：前端 debug 显示 data:16734b UIImage=nil hex:3c21444f43545950
+          （3c21444f43545950 = "<!DOCTYP" — 收到了 HTML 而非 PNG）
+
+解决方案：将图片数据嵌入 SSE file 事件（base64），复用 POST 流通道，
+          完全绕过 CDN 对 GET 的干扰。非图片文件仍走下载 API。
+```
 
 **前端实现：**
 
 | 组件 | 职责 |
 |------|------|
-| `FileInfo` 模型 | workspace 文件元数据（name/path/size/mimeType），支持 Codable |
+| `FileInfo` 模型 | workspace 文件元数据（name/path/size/mimeType/inlineData），支持 Codable |
 | `StreamEvent.file` | SSE 解析层新增的文件事件 case |
-| `FileDownloader` actor | 文件下载 + 图片内存缓存 + JWT header 注入 |
-| `FileCardView` | 图片 → AsyncImage 内联展示；非图片 → SF Symbol + 文件名 + 大小卡片 |
+| `FileDownloader` actor | 文件下载 + 图片内存缓存 + 401 自动刷新重试 + Content-Type 校验（防 HTML 误判） |
+| `FileCardView` | 图片 → 优先使用 SSE 内联 base64（降级为 HTTP 下载）+ 3 次重试 + 缩略图展示；非图片 → SF Symbol + 文件名 + 大小卡片 |
+| `FullScreenImageViewer` | 全屏图片查看器：捏合缩放（MagnificationGesture，iOS 16+）+ 双击缩放 + 拖动关闭 |
 | `FilePreviewSheet` | QLPreviewController 封装，支持 PDF/Office/图片/音视频预览 |
 | `ShareSheet` | UIActivityViewController 封装，支持保存到手机/分享 |
 
@@ -857,6 +873,48 @@ Secrets：
 - 蓝绿升级
 - 自动回滚
 - 升级前强制 Checkpoint
+
+### 14.1 OpenClaw 内核隔离性评估
+
+> 更新：2026-02-18。Phase 0 完成后的架构隔离确认。
+
+**核心结论：所有 Phase 0 改动均未触碰 OpenClaw 内核代码，OpenClaw 可平滑升级。**
+
+ClawBowl 的三层架构天然保证了隔离性：
+
+```
+┌─ iOS App（SwiftUI）──────────────────────────────────┐
+│  FileCardView / FileDownloader / FullScreenImageViewer │  ← 我们的代码
+│  ChatView / MessageBubble / MarkdownUI                 │  ← 我们的代码
+└────────────────────────────────────────────────────────┘
+          ↕ HTTPS + SSE
+┌─ Backend Proxy（FastAPI）─────────────────────────────┐
+│  proxy.py: 日期注入 / workspace diff / SSE file 事件   │  ← 我们的代码
+│  file_router.py: 文件下载 API                          │  ← 我们的代码
+│  chat_router.py: 对话持久化 / 流式包装                  │  ← 我们的代码
+│  auth.py: JWT 认证                                     │  ← 我们的代码
+└────────────────────────────────────────────────────────┘
+          ↕ HTTP (OpenAI 兼容 API)
+┌─ OpenClaw Container（Docker）────────────────────────┐
+│  openclaw gateway --bind lan --port 18789             │  ← 未修改
+│  /usr/lib/node_modules/openclaw (bind mount)          │  ← 未修改
+│  /data/config/openclaw.json                           │  ← 仅配置
+│  /data/workspace/                                     │  ← Agent 工作区
+└────────────────────────────────────────────────────────┘
+```
+
+**逐项确认：**
+
+| 类别 | 文件 | 是否触碰 OpenClaw 内核 | 说明 |
+|------|------|----------------------|------|
+| iOS 前端 | `ClawBowl/*.swift`（15 个文件） | ❌ 完全独立 | SwiftUI 纯前端，通过 HTTPS 与后端通信 |
+| 后端代理 | `backend/app/**/*.py`（15 个文件） | ❌ 完全独立 | FastAPI 服务，通过 HTTP 转发到 OpenClaw |
+| OpenClaw 配置 | `openclaw.json` | ❌ 仅配置 | 模型/fallback/工具开关，属于正常运维操作 |
+| OpenClaw Node.js 代码 | `/usr/lib/node_modules/openclaw/` | ❌ 未修改 | bind mount 只读挂载，容器内代码完全原版 |
+| OpenClaw Docker 镜像 | `clawbowl-openclaw:latest` | ❌ 未修改 | 基于官方镜像构建，未 patch 任何源码 |
+| Workspace 文件 | `AGENTS.md / SOUL.md / MEMORY.md` | ❌ 配置级 | Agent 行为规则，属于用户数据层，非内核 |
+
+**升级路径**：`docker pull` 新版 OpenClaw → 停旧容器 → 启新容器（复用 config + workspace bind mount）→ 健康检查。我们的所有改动（proxy / iOS / 下载 API）对 OpenClaw 完全透明。
 
 ---
 
@@ -1136,6 +1194,68 @@ ZenMux 是 ClawBowl 当前的 LLM 聚合层，通过统一的 OpenAI 兼容接�
 | 模型升级导致行为变化 | Agent 提示词失效 | SOUL.md / AGENTS.md 版本化管理 |
 | 国际模型封锁加剧 | 无法使用 Claude/GPT | 国内模型已接近可用水平，且持续追赶 |
 
+### 17.5 时效性数据问题与联网 LLM 评估
+
+> 更新：2026-02-18
+
+#### 问题描述
+
+当前 Agent 使用的 LLM（DeepSeek V3.2 等）没有实时联网能力。虽然 proxy.py 注入了日期上下文使 Agent 知道"今天是 2026-02-18"，但 LLM 的训练数据存在截止日期，导致以下问题：
+
+```
+用户："显示近 5 个月比特币价格走势图"
+Agent 行为：
+  1. ✅ 正确推算日期区间（2025-09 ~ 2026-02）
+  2. ❌ 从训练数据中取出过时价格（非真实行情）
+  3. ❌ 用过时价格 + 正确日期生成图表 → 误导用户
+```
+
+**根因**：日期注入只解决了"Agent 不知道今天几号"的问题，没有解决"Agent 的知识库是过时的"问题。对于实时性数据（股价、天气、新闻），LLM 应该使用 `web_search` 工具获取数据，而非依赖训练数据。
+
+#### 方案对比
+
+| 方案 | 原理 | 优点 | 缺点 | 可行性 |
+|------|------|------|------|--------|
+| **A. 强化提示词** | 在 AGENTS.md 中明确要求"任何实时性数据必须先 web_search" | 零成本、零改动 | 依赖 LLM 遵循指令，非 100% 可靠 | ⭐⭐⭐ 推荐先做 |
+| **B. ZenMux Web Search** | 在 API 请求中加 `web_search_options` 参数 | ZenMux 原生支持、支持所有模型 | 额外成本、增加延迟、与 OpenClaw 内置 web_search 工具可能冲突 | ⚠️ 架构冲突 |
+| **C. OpenRouter :online** | 模型 slug 加 `:online` 后缀启用搜索 | 31 个免费模型可用 | 20 req/min 限流、Exa 搜索额外收费、国内模型选择少 | ⚠️ 限制多 |
+| **D. 仅用联网 LLM** | 只使用原生支持联网的模型 | 数据最准确 | 国内免费联网 LLM 几乎不存在；大幅缩小模型选择范围 | ❌ 不可行 |
+
+#### OpenRouter vs ZenMux 联网能力对比
+
+| 维度 | OpenRouter | ZenMux |
+|------|------------|--------|
+| **联网机制** | 模型 slug 加 `:online` 后缀 | `web_search_options` 请求参数 |
+| **支持的国内免费模型** | Qwen3 系列、GLM-4.5-Air、StepFun | 需确认（文档未列出免费联网模型） |
+| **搜索引擎** | Exa（非原生模型）/ 原生（OpenAI/Anthropic） | 自建搜索服务，支持地理位置过滤 |
+| **免费额度** | 搜索本身收费（即使模型免费） | 搜索本身收费 |
+| **免费模型限流** | 20 req/min, 200 req/day | 未公开 |
+| **已接入 ClawBowl** | ❌ 未接入 | ✅ 已接入 |
+| **与 OpenClaw 兼容性** | 需改 proxy 添加 `:online` | 需改 proxy 添加 `web_search_options` |
+
+#### 推荐策略：A + 监控
+
+**短期（Phase 0/1）**：强化 AGENTS.md 提示词，要求 Agent 对时效性查询强制使用 `web_search` 工具。这利用了 OpenClaw 已有的 Tavily 搜索能力，零成本零改动。
+
+```markdown
+# AGENTS.md 新增规则
+## 实时数据规则
+对于以下类型的查询，你必须先使用 web_search 工具获取最新数据，禁止使用训练数据：
+- 股票/加密货币/汇率等金融数据
+- 天气预报
+- 新闻/时事
+- 产品价格/库存
+- 体育赛事比分
+- 任何用户明确要求"最新"或"当前"的信息
+```
+
+**中期（Phase 3）**：如果提示词方案不够可靠，再考虑在 proxy 层为特定场景（如检测到金融/天气关键词）自动启用 ZenMux `web_search_options`。
+
+**不推荐**：完全剔除非联网 LLM。原因：
+1. 国内免费联网 LLM 几乎不存在——联网能力都需额外付费
+2. OpenClaw 已有 `web_search`（Tavily）+ `web_fetch` 工具链，Agent 本身具备联网能力
+3. 问题本质是 Agent 行为（该搜不搜），不是 LLM 能力（能不能搜）
+
 ---
 
 ## 18. OpenClaw 功能激活路径
@@ -1155,8 +1275,15 @@ ZenMux 是 ClawBowl 当前的 LLM 聚合层，通过统一的 OpenAI 兼容接�
 | 工具记忆 | TOOLS.md 自动更新 | ✅ |
 | 推理展示 | thinking 浅色字体 + 最终 content 分离 | ✅ |
 | **前端流式性能优化** | SSE 节流（100ms 批量刷新）+ 自定义 Equatable + 图片异步解码 + 异步加载 | ✅ |
-| **对话全量持久化** | chat_logs 表：user_id / event_id / 对话原文 / 工具调用 / 文件指针 / 状态 | ✅ |
+| **对话全量持久化** | chat_logs 表：user_id / event_id / 对话原文 / 工具调用 / 文件指针 / 状态；SSE 中断亦持久化（try/finally） | ✅ |
 | **内容安全过滤** | 0-chunk 检测 → filtered 事件 → 前端自动清洗上下文 + 后端保留审计记录 | ✅ |
+| **文件下载** | workspace diff → SSE file 事件 → 前端 FileCardView + QLPreview + ShareSheet | ✅ |
+| **图片内联展示** | SSE file 事件携带 base64 内联数据（≤512KB），前端直接解码为缩略图，点击全屏查看原图 | ✅ |
+| **Markdown 富文本渲染** | MarkdownUI 2.4.1，assistant 消息渲染 Markdown（代码块/标题/链接/引用），自定义 clawBowlAssistant 主题 | ✅ |
+| **Workspace Diff 优化** | os.walk + 目录剪枝（排除 venv/node_modules 等），快照性能从 1069ms → 1.1ms | ✅ |
+| **Agent 时间感知** | system 消息 + 用户消息双重注入当前 UTC 日期/年份（已知局限见 17.5 节） | ✅ |
+| **CDN 兼容性** | Cloudflare 拦截 GET 文件请求 → 改为 SSE 内联 base64 传输图片，彻底绕过 CDN | ✅ |
+| **错误包装 + LLM 故障转移** | openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底 | ✅ |
 
 ### Phase 1 — 自主能力 + 基础备份（下一步）
 
@@ -1269,21 +1396,24 @@ RUN npx playwright install --with-deps chromium
 4. ~~推理过程/最终结果分离~~
 5. ~~TOOLS.md 自动维护~~
 6. ~~**前端流式性能优化**~~（✅ SSE 节流 100ms + 自定义 Equatable + 图片异步解码 + 异步加载）
-7. ~~**对话全量持久化**~~（✅ chat_logs 表：user/event_id/对话原文/工具调用/文件指针/状态）
+7. ~~**对话全量持久化**~~（✅ chat_logs 表 + SSE 中断 try/finally 保障）
 8. ~~**内容安全过滤**~~（✅ 0-chunk 检测 + filtered 事件 + 前端自动清洗 + 后端审计保留）
+9. ~~**错误包装 + LLM 故障转移**~~（✅ openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底）
+10. ~~**文件下载功能**~~（✅ 下载 API + workspace diff + SSE file 事件 + CDN base64 内联）
+11. ~~**对话区富内容展示**~~（✅ MarkdownUI + 图片缩略图/全屏查看 + 文件卡片 + QLPreview）
+12. ~~**修复对话区刷新空白 Bug**~~（✅ Ready Gate 机制）
+13. ~~**滚动到底部浮动按钮**~~（✅ 底部锚点 + 浮动箭头）
+14. ~~**Workspace Diff 性能优化**~~（✅ os.walk + 目录剪枝，1069ms → 1.1ms）
+15. ~~**Agent 时间感知**~~（✅ system + user 双重日期注入，已知局限见 17.5）
+16. ~~**CDN 兼容性**~~（✅ Cloudflare HTML 拦截 → SSE 内联 base64 绕过）
 
 **立即做**（Phase 1）：
-1. ~~**错误包装 + LLM 故障转移**~~（✅ 已完成：openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底）
-2. ~~**文件下载功能**~~（✅ 已完成：下载 API + workspace diff + SSE file 事件 + FileCardView + QLPreview + ShareSheet）
-3. ~~**对话区富内容展示**~~（✅ 已完成：MarkdownUI 渲染 + 图片内联 + 文件卡片 + 自定义主题）
-4. **Stop 按钮**（前端即停，后端异步清理）
-4. ~~**修复对话区刷新空白 Bug**~~（✅ 已修复：Ready Gate 机制，UI ready 后才发请求）
-5. ~~**滚动到底部浮动按钮**~~（✅ 已完成：底部锚点 onAppear/onDisappear + 浮动箭头按钮）
-6. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
-7. 启用 Cron + Heartbeat
-8. 配置 HEARTBEAT.md 自动检查项
-9. 启用 sessions_spawn（子任务）
-10. 前端"定时任务"管理 UI
+1. **Stop 按钮**（前端即停，后端异步清理）
+2. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
+3. 启用 Cron + Heartbeat
+4. 配置 HEARTBEAT.md 自动检查项
+5. 启用 sessions_spawn（子任务）
+6. 前端"定时任务"管理 UI
 
 **1.0 后做**（Phase 2-3）：
 1. Docker 镜像安装 Chromium + Playwright
