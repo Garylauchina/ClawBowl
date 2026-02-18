@@ -168,7 +168,7 @@ struct FileCardView: View {
     private func downloadForPreview() {
         guard !isDownloading else { return }
 
-        if let url = previewURL {
+        if previewURL != nil {
             showPreview = true
             return
         }
@@ -196,7 +196,7 @@ struct FileCardView: View {
     private func downloadForShare() {
         guard !isDownloading else { return }
 
-        if let url = previewURL {
+        if previewURL != nil {
             showShare = true
             return
         }
