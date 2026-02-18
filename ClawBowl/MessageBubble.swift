@@ -155,6 +155,9 @@ struct MessageBubble: View {
 
     private var filesSection: some View {
         VStack(alignment: .leading, spacing: 6) {
+            Text("files: \(message.files.count)")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(.red)
             ForEach(message.files) { file in
                 FileCardView(file: file)
             }

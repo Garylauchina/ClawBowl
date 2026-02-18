@@ -267,18 +267,37 @@ _REQ_TIMEOUT = httpx.Timeout(connect=30, read=300, write=30, pool=30)
 
 
 def _inject_date_context(messages: list[dict]) -> list[dict]:
-    """Prepend a system message with the current date/time so the Agent
-    has accurate temporal awareness."""
+    """Inject current date/time context so the Agent has accurate temporal
+    awareness.  Two-pronged approach:
+    1. Prepend a system message (for agents that honor system prompts)
+    2. Append a short reminder to the last user message (hard to ignore)
+    """
     now = datetime.now(timezone.utc)
-    date_msg = {
+    date_str = now.strftime("%Y-%m-%d %H:%M UTC")
+    weekday = now.strftime("%A")
+
+    system_msg = {
         "role": "system",
         "content": (
-            f"Current date and time: {now.strftime('%Y-%m-%d %H:%M UTC')} "
-            f"({now.strftime('%A')}). "
-            "Use this as the reference for any time-related queries."
+            f"IMPORTANT: Today is {date_str} ({weekday}), year {now.year}. "
+            f"Always use {now.year} as the current year for any time calculations."
         ),
     }
-    return [date_msg] + messages
+
+    result = [system_msg] + list(messages)
+
+    # Also tag the last user message with a date hint
+    for i in range(len(result) - 1, -1, -1):
+        if result[i].get("role") == "user":
+            content = result[i].get("content", "")
+            if isinstance(content, str) and str(now.year) not in content:
+                result[i] = dict(result[i])
+                result[i]["content"] = (
+                    f"{content}\n\n[System note: current date is {date_str}, year {now.year}]"
+                )
+            break
+
+    return result
 
 
 def _build_request_parts(

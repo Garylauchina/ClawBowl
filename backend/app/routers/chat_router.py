@@ -96,6 +96,9 @@ async def _logged_stream(
             # Parse SSE line for logging (best-effort, never block streaming)
             if not chunk.startswith("data: ") or chunk.startswith("data: [DONE]"):
                 continue
+            # Log file events for debugging
+            if '"file"' in chunk:
+                logger.info("SSE file event yielded: %s", chunk[:120])
             try:
                 payload = json.loads(chunk[6:])
                 choices = payload.get("choices") or []

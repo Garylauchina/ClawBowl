@@ -84,7 +84,7 @@ struct FileCardView: View {
                 }
             }
 
-            Text("\(file.name) · \(file.formattedSize)")
+            Text("\(file.name) · \(file.formattedSize) [\(phaseLabel)]")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
@@ -265,5 +265,14 @@ struct FileCardView: View {
         let ext = (file.name as NSString).pathExtension.uppercased()
         if ext.isEmpty { return "文件" }
         return "\(ext) 文件"
+    }
+
+    private var phaseLabel: String {
+        switch loadPhase {
+        case .idle: return "idle"
+        case .loading: return "loading"
+        case .loaded: return "ok"
+        case .failed: return "FAIL"
+        }
     }
 }
