@@ -88,6 +88,12 @@ struct FileCardView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
+            if !debugInfo.isEmpty {
+                Text(debugInfo)
+                    .font(.system(size: 8, design: .monospaced))
+                    .foregroundColor(.orange)
+                    .lineLimit(2)
+            }
         }
         .task(id: file.path) {
             await loadImageAsync()
@@ -174,6 +180,8 @@ struct FileCardView: View {
         }
     }
 
+    @State private var debugInfo: String = ""
+
     // MARK: - Async Image Loading
 
     private func loadImageAsync() async {
@@ -183,11 +191,21 @@ struct FileCardView: View {
             loadPhase = .loading
 
             do {
-                let image = try await FileDownloader.shared.downloadImage(path: file.path)
-                downloadedImage = image
-                loadPhase = image != nil ? .loaded : .failed
-                if loadPhase == .loaded { return }
+                let data = try await FileDownloader.shared.downloadFileData(path: file.path)
+                debugInfo = "data:\(data.count)b"
+                if let image = UIImage(data: data) {
+                    await FileDownloader.shared.cacheImage(image, forPath: file.path)
+                    downloadedImage = image
+                    loadPhase = .loaded
+                    debugInfo += " ok"
+                    return
+                } else {
+                    let prefix = data.prefix(8).map { String(format: "%02x", $0) }.joined()
+                    debugInfo += " UIImage=nil hex:\(prefix)"
+                    loadPhase = .failed
+                }
             } catch {
+                debugInfo = "err:\(error.localizedDescription.prefix(40))"
                 loadPhase = .failed
             }
 

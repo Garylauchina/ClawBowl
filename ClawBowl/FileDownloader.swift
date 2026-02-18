@@ -120,6 +120,11 @@ actor FileDownloader {
 
     // MARK: - Cache Management
 
+    /// 手动缓存图片
+    func cacheImage(_ image: UIImage, forPath path: String) {
+        imageCache[path] = image
+    }
+
     /// 清空图片缓存
     func clearCache() {
         imageCache.removeAll()
