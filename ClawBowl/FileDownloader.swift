@@ -8,7 +8,7 @@ actor FileDownloader {
     private let baseURL = "https://prometheusclothing.net/api/v2/files/download"
 
     /// 内存缓存：已下载的图片（key = workspace relative path）
-    private var imageCache: [String: UIImage] = []
+    private var imageCache: [String: UIImage] = [:]
 
     /// 正在下载中的任务（防止重复请求）
     private var inFlightImages: [String: Task<UIImage?, Error>] = [:]
