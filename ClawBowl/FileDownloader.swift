@@ -67,30 +67,40 @@ actor FileDownloader {
 
     // MARK: - Raw Data Download
 
-    /// 下载文件原始数据
+    /// 下载文件原始数据（含 401 自动刷新重试）
     func downloadFileData(path: String) async throws -> Data {
-        guard let token = await AuthService.shared.accessToken else {
-            throw FileDownloadError.notAuthenticated
-        }
+        for attempt in 0..<2 {
+            guard let token = await AuthService.shared.accessToken else {
+                throw FileDownloadError.notAuthenticated
+            }
 
-        var components = URLComponents(string: baseURL)!
-        components.queryItems = [URLQueryItem(name: "path", value: path)]
+            var components = URLComponents(string: baseURL)!
+            components.queryItems = [URLQueryItem(name: "path", value: path)]
 
-        guard let url = components.url else {
-            throw FileDownloadError.invalidURL
-        }
+            guard let url = components.url else {
+                throw FileDownloadError.invalidURL
+            }
 
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 60
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.timeoutInterval = 60
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
 
-        guard let http = response as? HTTPURLResponse else {
-            throw FileDownloadError.invalidResponse
-        }
+            guard let http = response as? HTTPURLResponse else {
+                throw FileDownloadError.invalidResponse
+            }
 
-        guard http.statusCode == 200 else {
+            if http.statusCode == 200 {
+                return data
+            }
+
+            if http.statusCode == 401 && attempt == 0 {
+                try? await AuthService.shared.refreshToken()
+                continue
+            }
+
             if http.statusCode == 401 {
                 throw FileDownloadError.notAuthenticated
             } else if http.statusCode == 404 {
@@ -98,8 +108,7 @@ actor FileDownloader {
             }
             throw FileDownloadError.httpError(http.statusCode)
         }
-
-        return data
+        throw FileDownloadError.notAuthenticated
     }
 
     /// 构建文件下载 URL（供 MarkdownUI ImageProvider 使用）

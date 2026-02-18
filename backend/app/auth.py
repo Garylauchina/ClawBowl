@@ -1,10 +1,11 @@
 """JWT authentication utilities."""
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +14,9 @@ from app.config import settings
 from app.database import get_db
 from app.models import User
 
-security = HTTPBearer()
+logger = logging.getLogger("clawbowl.auth")
+
+security = HTTPBearer(auto_error=False)
 
 
 def hash_password(password: str) -> str:
@@ -45,10 +48,19 @@ def decode_access_token(token: str) -> str:
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """FastAPI dependency: extract and validate JWT, return User."""
+    if credentials is None:
+        auth_header = request.headers.get("authorization", "<missing>")
+        logger.warning(
+            "Auth failed: no Bearer credentials. Authorization header=%s, url=%s",
+            auth_header[:60] if auth_header else "<none>",
+            str(request.url),
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     user_id = decode_access_token(credentials.credentials)
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
