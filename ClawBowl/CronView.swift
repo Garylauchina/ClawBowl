@@ -119,7 +119,7 @@ private struct CronJobRow: View {
                     .font(.body.weight(.medium))
                     .lineLimit(2)
                 Spacer()
-                if !job.isEnabled {
+                if !job.enabled {
                     Text("已暂停")
                         .font(.caption2)
                         .foregroundColor(.white)
@@ -129,7 +129,7 @@ private struct CronJobRow: View {
                 }
             }
 
-            if job.displayMessage != job.displayName {
+            if !job.displayMessage.isEmpty, job.displayMessage != job.displayName {
                 Text(job.displayMessage)
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -141,7 +141,7 @@ private struct CronJobRow: View {
                     .font(.caption)
                     .foregroundColor(.blue)
 
-                if let status = job.state?.lastStatus {
+                if let status = job.lastStatus {
                     Label(
                         statusText(status),
                         systemImage: statusIcon(status)
