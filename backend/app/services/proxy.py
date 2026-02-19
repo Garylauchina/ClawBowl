@@ -289,27 +289,45 @@ async def _preprocess_attachments_async(
 _REQ_TIMEOUT = httpx.Timeout(connect=30, read=300, write=30, pool=30)
 
 
+_CRON_KEYWORDS = {"定时", "cron", "scheduled", "调度", "计划任务", "定期", "每小时", "每天", "每周", "整点"}
+
+_CRON_TOOL_HINT = (
+    "\n\n[CRITICAL TOOL INSTRUCTION] "
+    "You have a built-in `cron` tool for scheduled tasks. "
+    "DO NOT use exec/write/shell scripts or /etc/cron.d/. "
+    "System crontab is unavailable in this container. "
+    "Use ONLY: cron({\"action\":\"add\",\"job\":{\"name\":\"...\",\"schedule\":{\"kind\":\"cron\",\"expr\":\"...\",\"tz\":\"...\"},"
+    "\"payload\":{\"kind\":\"agentTurn\",\"message\":\"...\"},\"sessionTarget\":\"isolated\",\"delivery\":{\"mode\":\"none\"}}}) "
+    "To delete: cron({\"action\":\"delete\",\"jobId\":\"...\"}) "
+    "To list: cron({\"action\":\"list\"})"
+)
+
+
 def _inject_date_context(messages: list[dict]) -> list[dict]:
-    """Inject current date/time context so the Agent has accurate temporal
-    awareness.  Two-pronged approach:
-    1. Prepend a system message (for agents that honor system prompts)
-    2. Append a short reminder to the last user message (hard to ignore)
-    """
+    """Inject current date/time context and, when relevant, cron tool hints."""
     now = datetime.now(timezone.utc)
     date_str = now.strftime("%Y-%m-%d %H:%M UTC")
     weekday = now.strftime("%A")
 
-    system_msg = {
-        "role": "system",
-        "content": (
-            f"IMPORTANT: Today is {date_str} ({weekday}), year {now.year}. "
-            f"Always use {now.year} as the current year for any time calculations."
-        ),
-    }
+    system_content = (
+        f"IMPORTANT: Today is {date_str} ({weekday}), year {now.year}. "
+        f"Always use {now.year} as the current year for any time calculations."
+    )
 
+    # Detect if user message mentions scheduled tasks
+    last_user_text = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content", "")
+            last_user_text = c if isinstance(c, str) else ""
+            break
+
+    if any(kw in last_user_text for kw in _CRON_KEYWORDS):
+        system_content += _CRON_TOOL_HINT
+
+    system_msg = {"role": "system", "content": system_content}
     result = [system_msg] + list(messages)
 
-    # Also tag the last user message with a date hint
     for i in range(len(result) - 1, -1, -1):
         if result[i].get("role") == "user":
             content = result[i].get("content", "")
