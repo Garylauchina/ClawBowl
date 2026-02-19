@@ -1300,15 +1300,27 @@ Agent 行为：
 | ~~**对话区空白修复**~~ | Ready Gate：占位气泡 onAppear → 才发请求 | ChatView ready gate + 无动画滚动 | 无 | ✅ 已完成 |
 | ~~**滚动到底部按钮**~~ | 底部锚点 + 浮动箭头 | ChatView 悬浮按钮 | 无 | ✅ 已完成 |
 | **子 Agent 派生** | sessions_spawn（ping-pong） | 无（透明执行） | 启用 session tools | ⭐⭐ |
+| **APNs 系统推送** | APNs HTTP/2 + JWT + alert_monitor | NotificationManager + AppDelegate | apns_service + alert_monitor + device_token API | ⭐⭐⭐ |
 | **ClawHub 技能** | 安装社区技能到 workspace/skills/ | 添加"技能市场"入口 | 无（agent 自行安装） | ⭐⭐ |
 
 > **为什么基础备份必须在 Phase 1？** 启用 cron/heartbeat 后 Agent 开始自主行动，如果出错必须能回滚。没有备份就启用自动化 = 裸奔。
+
+> **为什么 APNs 推送是 Phase 1 核心能力？** OpenClaw 挂接 Telegram/Discord 等聊天平台时，推送能力完全受限于第三方——Agent 只能在对话流中回复，用户必须主动打开聊天窗口才能看到。独占 App + APNs 实现了系统级通知（锁屏、横幅、通知中心），这是 ClawBowl 相对于"OpenClaw + 任何第三方聊天工具"方案的**不可替代差异化能力**，是 Agent 从"被动问答"到"主动服务"的关键闭环。
+
+**APNs 推送架构**：
+```
+Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
+  → Backend alert_monitor 每 60s 轮询
+  → apns_service HTTP/2 + JWT → Apple APNs → iPhone 系统推送
+  → 用户点击通知 → App CronView
+```
 
 **预期效果**：
 - 用户说"每天早上 9 点帮我查天气" → agent 自动创建 cron
 - Agent 定期自主检查记忆、整理笔记
 - 复杂任务自动拆解为子任务
 - 任何操作出错 → 可从最近快照恢复
+- **Cron 检测到异常（如 BTC 波动 >1%）→ 即使 App 未打开，用户也收到系统推送**
 
 ### Phase 2 — 浏览器自动化
 
