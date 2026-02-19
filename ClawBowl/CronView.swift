@@ -36,7 +36,7 @@ struct CronView: View {
                         Text("暂无定时任务")
                             .font(.headline)
                             .foregroundColor(.secondary)
-                        Text("通过对话让 AI 创建定时任务\n例如："每天早上 9 点提醒我查收邮件"")
+                        Text("通过对话让 AI 创建定时任务\n例如：每天早上9点提醒我查收邮件")
                             .font(.subheadline)
                             .foregroundColor(.secondary.opacity(0.7))
                             .multilineTextAlignment(.center)
@@ -152,7 +152,8 @@ private struct CronJobRow: View {
             }
 
             if let next = job.nextRunDate {
-                Text("下次执行: \(Self.timeFormatter.string(from: next))")
+                let formatted = Self.timeFormatter.string(from: next)
+                Text("下次执行: " + formatted)
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
