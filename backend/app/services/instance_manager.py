@@ -201,6 +201,9 @@ class InstanceManager:
         # Wait for gateway to be ready (OpenClaw needs ~60-90s to start on low-spec VPS)
         await self._wait_for_ready(instance, timeout=120)
 
+        # Auto-approve gateway device pairing so cron/gateway tools work
+        await self._auto_approve_pairing(config_dir)
+
         logger.info("Created instance %s on port %d for user %s", container_name, port, user.id)
         return instance
 
@@ -272,6 +275,41 @@ class InstanceManager:
             return container.status == "running"
         except docker.errors.NotFound:
             return False
+
+    async def _auto_approve_pairing(self, config_dir: Path, retries: int = 5) -> None:
+        """Auto-approve any pending gateway device pairing requests.
+
+        The OpenClaw gateway-client generates a pairing request on first start.
+        Without approval, tools like cron/gateway won't function.
+        """
+        import json as _json
+
+        devices_dir = config_dir / "devices"
+        pending_path = devices_dir / "pending.json"
+        paired_path = devices_dir / "paired.json"
+
+        for attempt in range(retries):
+            await asyncio.sleep(3)
+            if not pending_path.exists():
+                continue
+            try:
+                pending = _json.loads(pending_path.read_text())
+                if not pending:
+                    continue
+
+                paired = _json.loads(paired_path.read_text()) if paired_path.exists() else {}
+                for req_id, device in pending.items():
+                    device["approved"] = True
+                    device["pairedAt"] = device.get("ts", 0)
+                    paired[device.get("deviceId", req_id)] = device
+
+                paired_path.write_text(_json.dumps(paired, indent=2))
+                pending_path.write_text(_json.dumps({}))
+                logger.info("Auto-approved %d gateway device pairing(s)", len(pending))
+                return
+            except Exception:
+                logger.debug("Pairing auto-approve attempt %d failed", attempt + 1)
+        logger.warning("No pending pairing requests found after %d attempts", retries)
 
     async def _wait_for_ready(self, instance: OpenClawInstance, timeout: int = 30) -> None:
         """Poll the gateway until it responds or timeout."""

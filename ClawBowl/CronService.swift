@@ -1,6 +1,71 @@
 import Foundation
 
-/// Cron job management API service
+struct CronJob: Identifiable, Codable {
+    let id: String
+    let name: String?
+    let enabled: Bool?
+    let agentId: String?
+    let createdAtMs: Int64?
+    let updatedAtMs: Int64?
+    let schedule: CronSchedule?
+    let sessionTarget: String?
+    let payload: CronPayload?
+    let delivery: CronDelivery?
+    let state: CronState?
+
+    struct CronSchedule: Codable {
+        let kind: String?
+        let expr: String?
+        let tz: String?
+    }
+
+    struct CronPayload: Codable {
+        let kind: String?
+        let message: String?
+    }
+
+    struct CronDelivery: Codable {
+        let mode: String?
+    }
+
+    struct CronState: Codable {
+        let nextRunAtMs: Int64?
+        let lastRunAtMs: Int64?
+        let lastStatus: String?
+        let lastError: String?
+        let lastDurationMs: Int64?
+        let consecutiveErrors: Int?
+    }
+
+    var displayName: String {
+        name ?? payload?.message?.prefix(40).appending("…") as? String ?? "(未命名任务)"
+    }
+
+    var displaySchedule: String {
+        guard let expr = schedule?.expr else { return "未知" }
+        let tz = schedule?.tz ?? ""
+        return tz.isEmpty ? expr : "\(expr) (\(tz))"
+    }
+
+    var displayMessage: String {
+        payload?.message ?? "(无描述)"
+    }
+
+    var isEnabled: Bool {
+        enabled ?? true
+    }
+
+    var nextRunDate: Date? {
+        guard let ms = state?.nextRunAtMs else { return nil }
+        return Date(timeIntervalSince1970: Double(ms) / 1000)
+    }
+
+    var lastRunDate: Date? {
+        guard let ms = state?.lastRunAtMs else { return nil }
+        return Date(timeIntervalSince1970: Double(ms) / 1000)
+    }
+}
+
 actor CronService {
     static let shared = CronService()
 
@@ -8,8 +73,7 @@ actor CronService {
 
     private init() {}
 
-    /// Fetch all cron jobs for the current user
-    func listJobs() async throws -> String {
+    func listJobs() async throws -> [CronJob] {
         guard let token = await AuthService.shared.accessToken else {
             throw CronError.notAuthenticated
         }
@@ -21,7 +85,7 @@ actor CronService {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 30
+        request.timeoutInterval = 15
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -30,15 +94,15 @@ actor CronService {
             throw CronError.serverError
         }
 
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let jobs = json["jobs"] as? String else {
-            return "No cron jobs configured"
+        struct JobsResponse: Codable {
+            let jobs: [CronJob]
         }
 
-        return jobs
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(JobsResponse.self, from: data)
+        return decoded.jobs
     }
 
-    /// Delete a cron job by ID
     func deleteJob(id: String) async throws {
         guard let token = await AuthService.shared.accessToken else {
             throw CronError.notAuthenticated
@@ -69,9 +133,9 @@ enum CronError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notAuthenticated: return "Please log in first"
-        case .invalidURL: return "Invalid request URL"
-        case .serverError: return "Server error"
+        case .notAuthenticated: return "请先登录"
+        case .invalidURL: return "请求地址无效"
+        case .serverError: return "服务器错误"
         }
     }
 }

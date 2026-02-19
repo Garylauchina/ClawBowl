@@ -1,10 +1,11 @@
-"""Cron job management endpoints - proxy to OpenClaw gateway cron tool."""
+"""Cron job management endpoints - read directly from OpenClaw cron config."""
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,41 +18,21 @@ logger = logging.getLogger("clawbowl.cron")
 
 router = APIRouter(prefix="/api/v2/cron", tags=["cron"])
 
-_TIMEOUT = httpx.Timeout(connect=10, read=30, write=10, pool=10)
+
+def _jobs_json_path(config_path: str) -> Path:
+    return Path(config_path) / "cron" / "jobs.json"
 
 
-async def _gateway_cron_action(
-    inst, action: str, extra: dict | None = None,
-) -> dict:
-    """Send a cron tool action to the OpenClaw gateway via chat completions."""
-    url = f"http://127.0.0.1:{inst.port}/v1/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {inst.gateway_token}",
-    }
-
-    import json
-    args = {"action": action}
-    if extra:
-        args.update(extra)
-
-    body = {
-        "model": "zenmux/deepseek/deepseek-chat",
-        "messages": [
-            {
-                "role": "user",
-                "content": f"Use the cron tool with action={action}. "
-                           f"Args: {json.dumps(args)}",
-            }
-        ],
-        "stream": False,
-        "user": inst.user_id,
-    }
-
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(url, json=body, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+def _read_jobs(config_path: str) -> list[dict]:
+    path = _jobs_json_path(config_path)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+        return data.get("jobs", [])
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to read cron jobs from %s: %s", path, exc)
+        return []
 
 
 @router.get("/jobs")
@@ -64,15 +45,8 @@ async def list_jobs(
     if inst is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No instance found")
 
-    try:
-        result = await _gateway_cron_action(inst, "list")
-        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        return {"jobs": content}
-    except httpx.ConnectError:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Instance not ready")
-    except Exception as exc:
-        logger.exception("Cron list failed for user %s", user.id)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+    jobs = _read_jobs(inst.config_path)
+    return {"jobs": jobs}
 
 
 @router.delete("/jobs/{job_id}")
@@ -86,12 +60,24 @@ async def delete_job(
     if inst is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No instance found")
 
+    path = _jobs_json_path(inst.config_path)
+    if not path.exists():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No cron config found")
+
     try:
-        result = await _gateway_cron_action(inst, "remove", {"id": job_id})
-        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        return {"result": content}
-    except httpx.ConnectError:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Instance not ready")
-    except Exception as exc:
-        logger.exception("Cron delete failed for user %s, job %s", user.id, job_id)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Read error: {exc}") from exc
+
+    original_count = len(data.get("jobs", []))
+    data["jobs"] = [j for j in data.get("jobs", []) if j.get("id") != job_id]
+
+    if len(data["jobs"]) == original_count:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Job {job_id} not found")
+
+    try:
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    except OSError as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Write error: {exc}") from exc
+
+    return {"result": "deleted", "job_id": job_id}
