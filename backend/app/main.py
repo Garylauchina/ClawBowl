@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import Base, async_session, engine
-from app.routers import admin_router, auth_router, chat_router, cron_router, file_router, instance_router, snapshot_router
+from app.routers import admin_router, auth_router, chat_router, cron_router, file_router, instance_router, notification_router, snapshot_router
 from app.services.instance_manager import instance_manager
 
 logging.basicConfig(
@@ -82,9 +82,11 @@ async def lifespan(app: FastAPI):
     logger.info("OpenClaw port range: %d-%d", settings.openclaw_port_range_start, settings.openclaw_port_range_end)
 
     # Start background tasks
+    from app.services.alert_monitor import alert_monitor_loop
     idle_task = asyncio.create_task(_idle_reaper())
     health_task = asyncio.create_task(_health_checker())
     snapshot_task = asyncio.create_task(_periodic_snapshot())
+    alert_task = asyncio.create_task(alert_monitor_loop())
 
     yield
 
@@ -92,6 +94,7 @@ async def lifespan(app: FastAPI):
     idle_task.cancel()
     health_task.cancel()
     snapshot_task.cancel()
+    alert_task.cancel()
     logger.info("ClawBowl Orchestrator shutting down")
 
 
@@ -118,6 +121,7 @@ app.include_router(file_router.router)
 app.include_router(instance_router.router)
 app.include_router(snapshot_router.router)
 app.include_router(cron_router.router)
+app.include_router(notification_router.router)
 app.include_router(admin_router.router)
 
 

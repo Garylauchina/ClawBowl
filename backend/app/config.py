@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     openclaw_host_modules: str = "/usr/lib/node_modules/openclaw"
     openclaw_host_bin: str = "/usr/bin/openclaw"
 
+    # --- APNs Push Notifications ---
+    apns_key_path: str = ""
+    apns_key_id: str = ""
+    apns_team_id: str = ""
+    apns_bundle_id: str = "com.gangliu.ClawBowl"
+    apns_use_sandbox: bool = True
+
     # --- External API keys ---
     tavily_api_key: str = ""
 

@@ -1,7 +1,9 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct ClawBowlApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var authService = AuthService.shared
     @StateObject private var startup = StartupController()
 
@@ -9,22 +11,48 @@ struct ClawBowlApp: App {
         WindowGroup {
             Group {
                 if !startup.isReady {
-                    // ── 第一步：先显示欢迎屏 ──
                     SplashView(progress: startup.progressText)
                         .onAppear {
-                            // 欢迎屏显示后，再通知后端开始工作
                             startup.beginStartup()
                         }
                 } else if authService.isAuthenticated {
-                    // ── 正常聊天界面（原始布局，无任何外层包裹）──
                     ChatView()
                         .environmentObject(authService)
+                        .onAppear {
+                            NotificationManager.shared.requestPermission()
+                        }
                 } else {
                     AuthView(authService: authService)
                 }
             }
             .animation(.easeInOut, value: authService.isAuthenticated)
         }
+    }
+}
+
+// MARK: - AppDelegate for APNs callbacks
+
+class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        _ = NotificationManager.shared
+        return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        NotificationManager.shared.handleDeviceToken(deviceToken)
+    }
+
+    func application(
+        _ application: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        NotificationManager.shared.handleRegistrationError(error)
     }
 }
 

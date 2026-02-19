@@ -258,6 +258,9 @@ struct ChatView: View {
             .sheet(isPresented: $showCronView) {
                 CronView()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .didTapPushNotification)) { _ in
+                showCronView = true
+            }
             .alert("退出登录", isPresented: $showLogoutAlert) {
                 Button("取消", role: .cancel) {}
                 Button("退出", role: .destructive) {
