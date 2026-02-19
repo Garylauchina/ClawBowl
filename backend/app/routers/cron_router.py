@@ -35,7 +35,7 @@ def _read_jobs(config_path: str) -> list[dict]:
         return []
 
 
-@router.get("/jobs")
+@router.post("/jobs")
 async def list_jobs(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

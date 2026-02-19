@@ -72,8 +72,10 @@ actor CronService {
         }
 
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "{}".data(using: .utf8)
         request.timeoutInterval = 15
 
         let (data, response) = try await URLSession.shared.data(for: request)
