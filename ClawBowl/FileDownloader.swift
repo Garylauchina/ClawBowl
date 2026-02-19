@@ -5,12 +5,9 @@ import UIKit
 actor FileDownloader {
     static let shared = FileDownloader()
 
-    private let baseURL = "https://prometheusclothing.net/api/v2/files/download"
+    private let endpoint = "https://prometheusclothing.net/api/v2/files/download"
 
-    /// 内存缓存：已下载的图片（key = workspace relative path）
     private var imageCache: [String: UIImage] = [:]
-
-    /// 正在下载中的任务（防止重复请求）
     private var inFlightImages: [String: Task<UIImage?, Error>] = [:]
 
     private init() {}
@@ -67,26 +64,26 @@ actor FileDownloader {
 
     // MARK: - Raw Data Download
 
-    /// 下载文件原始数据（token 放在 URL 参数中，绕过 Cloudflare header 干扰）
+    /// 通过 POST 下载文件数据（绕过 CDN 对 GET 请求的拦截）
     func downloadFileData(path: String) async throws -> Data {
+        guard let url = URL(string: endpoint) else {
+            throw FileDownloadError.invalidURL
+        }
+
         for attempt in 0..<2 {
             guard let token = await AuthService.shared.accessToken else {
                 throw FileDownloadError.notAuthenticated
             }
 
-            var components = URLComponents(string: baseURL)!
-            components.queryItems = [
-                URLQueryItem(name: "path", value: path),
-                URLQueryItem(name: "token", value: token),
-            ]
-
-            guard let url = components.url else {
-                throw FileDownloadError.invalidURL
-            }
-
             var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             request.cachePolicy = .reloadIgnoringLocalCacheData
             request.timeoutInterval = 60
+
+            let body: [String: String] = ["path": path, "token": token]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
             let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -115,13 +112,6 @@ actor FileDownloader {
             throw FileDownloadError.httpError(http.statusCode)
         }
         throw FileDownloadError.notAuthenticated
-    }
-
-    /// 构建文件下载 URL（供 MarkdownUI ImageProvider 使用）
-    func buildDownloadURL(path: String) -> URL? {
-        var components = URLComponents(string: baseURL)
-        components?.queryItems = [URLQueryItem(name: "path", value: path)]
-        return components?.url
     }
 
     // MARK: - Cache Management

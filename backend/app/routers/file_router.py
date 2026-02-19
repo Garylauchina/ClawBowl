@@ -1,8 +1,7 @@
 """File download endpoint – serves files from user's OpenClaw workspace.
 
 Security:
-- JWT authentication via query parameter token (avoids Cloudflare header interference)
-- Fallback to Authorization header for direct/curl access
+- JWT via Authorization header (POST bypasses CDN interception of GET requests)
 - Path traversal protection (resolved path must be inside workspace)
 - File existence check
 """
@@ -13,8 +12,9 @@ import logging
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,17 +28,18 @@ logger = logging.getLogger("clawbowl.files")
 router = APIRouter(prefix="/api/v2", tags=["files"])
 
 
-async def _get_user_from_token_param(
+class FileDownloadRequest(BaseModel):
+    path: str
+    token: str | None = None
+
+
+async def _get_user_for_download(
     request: Request,
-    token: str | None = Query(None, description="JWT access token"),
+    body: FileDownloadRequest,
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """Authenticate via query parameter `token` (primary) or Authorization header (fallback).
-
-    Query parameter auth avoids Cloudflare stripping/blocking Authorization headers
-    on GET requests for binary content.
-    """
-    jwt_token = token
+    """Authenticate via body token (primary) or Authorization header (fallback)."""
+    jwt_token = body.token
 
     if not jwt_token:
         auth_header = request.headers.get("authorization", "")
@@ -56,17 +57,17 @@ async def _get_user_from_token_param(
     return user
 
 
-@router.get("/files/download")
+@router.post("/files/download")
 async def download_file(
-    path: str = Query(..., description="Workspace-relative file path"),
-    user: User = Depends(_get_user_from_token_param),
+    body: FileDownloadRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Download a file from the user's OpenClaw workspace.
+    """Download a file from the user's OpenClaw workspace (POST to bypass CDN).
 
-    The path is relative to the workspace root, e.g. ``output/chart.png``.
-    Authenticate via ``?token=<jwt>`` query parameter.
+    Body: ``{"path": "output/chart.png", "token": "<jwt>"}``
     """
+    user = await _get_user_for_download(request, body, db)
     inst = await instance_manager.get_instance(user.id, db)
     if inst is None:
         raise HTTPException(
@@ -81,7 +82,7 @@ async def download_file(
             detail="Workspace not found",
         )
 
-    requested = path.replace("\\", "/")
+    requested = body.path.replace("\\", "/")
     if ".." in requested.split("/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
