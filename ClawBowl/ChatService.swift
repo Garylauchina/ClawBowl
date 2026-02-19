@@ -207,6 +207,70 @@ actor ChatService {
         }
     }
 
+    // MARK: - Chat History (Pagination)
+
+    struct HistoryResponse {
+        let messages: [HistoryMessage]
+        let hasMore: Bool
+    }
+
+    struct HistoryMessage {
+        let id: String
+        let eventId: String
+        let role: String
+        let content: String
+        let thinkingText: String?
+        let status: String
+        let createdAt: String?
+    }
+
+    func fetchHistory(limit: Int = 30, before: String? = nil) async throws -> HistoryResponse {
+        guard let token = await AuthService.shared.accessToken else {
+            throw ChatError.notAuthenticated
+        }
+        guard let url = URL(string: "https://prometheusclothing.net/api/v2/chat/history") else {
+            throw ChatError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+
+        var params: [String: Any] = ["limit": limit]
+        if let before { params["before"] = before }
+        request.httpBody = try JSONSerialization.data(withJSONObject: params)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response)
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let msgArray = json["messages"] as? [[String: Any]],
+              let hasMore = json["has_more"] as? Bool else {
+            throw ChatError.invalidResponse
+        }
+
+        let messages = msgArray.compactMap { d -> HistoryMessage? in
+            guard let id = d["id"] as? String,
+                  let eventId = d["event_id"] as? String,
+                  let role = d["role"] as? String,
+                  let content = d["content"] as? String,
+                  let status = d["status"] as? String else { return nil }
+            return HistoryMessage(
+                id: id,
+                eventId: eventId,
+                role: role,
+                content: content,
+                thinkingText: d["thinking_text"] as? String,
+                status: status,
+                createdAt: d["created_at"] as? String
+            )
+        }
+
+        return HistoryResponse(messages: messages, hasMore: hasMore)
+    }
+
     // MARK: - Stream cancellation
 
     /// 通知后端取消当前活跃的 SSE 流（fire-and-forget，不等待响应）

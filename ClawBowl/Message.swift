@@ -94,6 +94,17 @@ struct Message: Identifiable, Equatable {
     var isStreaming: Bool
     /// Agent 在 workspace 中生成的文件列表（通过 SSE file 事件检测）
     var files: [FileInfo]
+    /// 后端 event_id，用于与服务器历史同步去重
+    var eventId: String?
+
+    static func == (lhs: Message, rhs: Message) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.content == rhs.content &&
+        lhs.thinkingText == rhs.thinkingText &&
+        lhs.status == rhs.status &&
+        lhs.isStreaming == rhs.isStreaming &&
+        lhs.files.count == rhs.files.count
+    }
 
     enum Role: String, Codable {
         case user
@@ -108,23 +119,27 @@ struct Message: Identifiable, Equatable {
     }
 
     init(
+        id: UUID = UUID(),
         role: Role,
         content: String,
         attachment: Attachment? = nil,
+        timestamp: Date = Date(),
         status: Status = .sent,
         thinkingText: String = "",
         isStreaming: Bool = false,
-        files: [FileInfo] = []
+        files: [FileInfo] = [],
+        eventId: String? = nil
     ) {
-        self.id = UUID()
+        self.id = id
         self.role = role
         self.content = content
         self.attachment = attachment
-        self.timestamp = Date()
+        self.timestamp = timestamp
         self.status = status
         self.thinkingText = thinkingText
         self.isStreaming = isStreaming
         self.files = files
+        self.eventId = eventId
     }
 
     /// 是否包含附件
@@ -152,9 +167,9 @@ enum MessageStore {
         return dir.appendingPathComponent("chat_messages.json")
     }
 
-    /// 保存消息列表（最多保留最近 50 条）
+    /// 保存消息列表（最多保留最近 200 条，更早的按需从后端分页拉取）
     static func save(_ messages: [Message]) {
-        let recent = messages.suffix(50)
+        let recent = messages.suffix(200)
         let persisted = recent.map { msg -> PersistedMessage in
             var label: String? = nil
             if let att = msg.attachment {

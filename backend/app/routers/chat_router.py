@@ -12,14 +12,17 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.database import async_session, get_db
 from app.models import ChatLog, User
-from app.schemas import ChatRequest
+from app.schemas import ChatHistoryRequest, ChatRequest
 from app.services.instance_manager import instance_manager
 from app.services.proxy import cancel_user_stream, proxy_chat_request, proxy_chat_stream
 
@@ -146,6 +149,63 @@ async def _logged_stream(
 
 
 # ── Endpoints ────────────────────────────────────────────────────────
+
+@router.post("/chat/history")
+async def chat_history(
+    body: ChatHistoryRequest = ChatHistoryRequest(),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Paginated chat history from chat_logs.
+
+    Uses POST to bypass CDN caching.
+    - ``before``: ISO 8601 timestamp — return messages older than this
+    - ``after``:  ISO 8601 timestamp — return messages newer than this
+    - ``limit``:  max items to return (1–100, default 30)
+    """
+    stmt = (
+        select(ChatLog)
+        .where(ChatLog.user_id == user.id)
+        .where(ChatLog.status.notin_(["filtered"]))
+    )
+
+    if body.before:
+        try:
+            ts = datetime.fromisoformat(body.before)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid 'before' timestamp")
+        stmt = stmt.where(ChatLog.created_at < ts)
+
+    if body.after:
+        try:
+            ts = datetime.fromisoformat(body.after)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid 'after' timestamp")
+        stmt = stmt.where(ChatLog.created_at > ts)
+
+    stmt = stmt.order_by(ChatLog.created_at.desc()).limit(body.limit + 1)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    has_more = len(rows) > body.limit
+    rows = rows[:body.limit]
+    rows.reverse()  # chronological order
+
+    messages = []
+    for r in rows:
+        messages.append({
+            "id": r.id,
+            "event_id": r.event_id,
+            "role": r.role,
+            "content": r.content,
+            "thinking_text": r.thinking_text,
+            "status": r.status,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "attachment_paths": json.loads(r.attachment_paths) if r.attachment_paths else None,
+        })
+
+    return {"messages": messages, "has_more": has_more}
+
 
 @router.post("/chat/cancel")
 async def cancel_chat(

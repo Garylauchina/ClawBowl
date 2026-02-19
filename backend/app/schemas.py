@@ -38,6 +38,14 @@ class ChatRequest(BaseModel):
     stream: bool = False
 
 
+# ── Chat History ──────────────────────────────────────────────────────
+
+class ChatHistoryRequest(BaseModel):
+    limit: int = Field(default=30, ge=1, le=100)
+    before: str | None = None
+    after: str | None = None
+
+
 # ── Instance ──────────────────────────────────────────────────────────
 
 class InstanceStatusResponse(BaseModel):

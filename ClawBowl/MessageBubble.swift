@@ -4,6 +4,7 @@ import SwiftUI
 /// 单条消息气泡视图（支持 Markdown 富文本、图片、文件附件和 Agent 生成文件）
 struct MessageBubble: View {
     let message: Message
+    @State private var decodedAttachmentImage: UIImage?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -16,12 +17,19 @@ struct MessageBubble: View {
                 VStack(alignment: .leading, spacing: 6) {
                     // 用户发送的附件（图片缩略图 或 文件图标+文件名）
                     if let att = message.attachment {
-                        if att.isImage, let uiImage = UIImage(data: att.data) {
-                            Image(uiImage: uiImage)
-                                .resizable()
-                                .scaledToFit()
-                                .frame(maxWidth: 240, maxHeight: 240)
-                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        if att.isImage {
+                            if let img = decodedAttachmentImage {
+                                Image(uiImage: img)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(maxWidth: 240, maxHeight: 240)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                            } else {
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(Color(.systemGray5))
+                                    .frame(width: 160, height: 120)
+                                    .overlay { ProgressView() }
+                            }
                         } else {
                             userAttachmentView(att)
                         }
@@ -59,9 +67,7 @@ struct MessageBubble: View {
                     }
                     if message.hasImage {
                         Button {
-                            if let att = message.attachment,
-                               att.isImage,
-                               let img = UIImage(data: att.data) {
+                            if let img = decodedAttachmentImage {
                                 UIPasteboard.general.image = img
                             }
                         } label: {
@@ -99,6 +105,13 @@ struct MessageBubble: View {
         .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 3)
+        .task(id: message.attachment?.filename) {
+            guard let att = message.attachment, att.isImage, decodedAttachmentImage == nil else { return }
+            let data = att.data
+            decodedAttachmentImage = await Task.detached(priority: .userInitiated) {
+                UIImage(data: data)
+            }.value
+        }
     }
 
     // MARK: - Content View (Markdown for assistant, plain text for user)
