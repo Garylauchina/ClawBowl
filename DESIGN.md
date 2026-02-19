@@ -1,6 +1,6 @@
-# ClawBowl 系统设计文档（V6）
+# ClawBowl 系统设计文档（V7）
 
-> 最后更新：2026-02-19
+> 最后更新：2026-02-20
 
 ---
 
@@ -1469,9 +1469,140 @@ RUN npx playwright install --with-deps chromium
 
 ---
 
-## 19. 当前阶段实施优先级
+## 19. 用户初始配置文件集（User Provisioning Bundle）
 
-> 更新：2026-02-19
+> 新增：2026-02-20
+
+### 19.1 问题背景
+
+当前用户开通时，`instance_manager._create_instance()` 只生成 `openclaw.json`，workspace 目录完全为空。所有 `.md` 文件（AGENTS/SOUL/USER/MEMORY/HEARTBEAT）均为手动创建，无法复现。平台部署配置（systemd、nginx）也未纳入版本管理。
+
+**目标**：为每个 Phase 的功能收尾定义"配置落地"检查项，确保新用户开通时自动获得完整、一致的初始环境。
+
+### 19.2 配置文件全景图
+
+配置分为三层，从外到内逐级生成：
+
+```
+┌─ Layer 1: 平台层（一次性部署，整个集群共享）──────────────┐
+│  .env                 后端环境变量                         │
+│  clawbowl.service     systemd 服务单元                     │
+│  nginx/clawbowl.conf  反向代理 + SSL                       │
+│  docker/Dockerfile    OpenClaw 容器镜像构建                 │
+│  deploy/              部署脚本 + 运维 Runbook               │
+└───────────────────────────────────────────────────────────┘
+┌─ Layer 2: 容器层（每用户自动生成）───────────────────────┐
+│  config/openclaw.json    运行时配置（模型/工具/gateway）   │
+│  config/cron/jobs.json   空初始 cron 配置                  │
+│  config/devices/         gateway 自动配对凭证              │
+│  config/identity/        设备身份（运行时自动生成）        │
+└───────────────────────────────────────────────────────────┘
+┌─ Layer 3: 工作区层（每用户初始化，Agent 的"出生包"）────┐
+│  workspace/AGENTS.md     行为规则 + 安全约束 + 工具指南    │
+│  workspace/SOUL.md       人格定义模板                      │
+│  workspace/USER.md       用户画像占位                      │
+│  workspace/MEMORY.md     长期记忆（空起步）                │
+│  workspace/HEARTBEAT.md  心跳检查清单                      │
+│  workspace/IDENTITY.md   身份标识                          │
+│  workspace/memory/       日志目录（空）                    │
+│  workspace/skills/       技能目录（可预装共享技能）        │
+└───────────────────────────────────────────────────────────┘
+```
+
+### 19.3 模板仓库结构
+
+所有模板文件统一存放在 `backend/templates/` 目录：
+
+```
+backend/templates/
+├── platform/
+│   ├── env.example              # .env 完整示例（含所有配置项）
+│   ├── clawbowl.service         # systemd 单元模板
+│   ├── nginx-clawbowl.conf      # nginx vhost 模板
+│   └── deploy-checklist.md      # 部署检查清单
+├── container/
+│   ├── openclaw-free.json       # 免费版 openclaw 模板
+│   ├── openclaw-premium.json    # 高级版 openclaw 模板
+│   └── cron-init.json           # {"version":1,"jobs":[]}
+└── workspace/
+    ├── AGENTS.md.j2             # Agent 行为规则模板
+    ├── SOUL.md.j2               # 人格模板（含占位符）
+    ├── USER.md.j2               # 用户画像模板
+    ├── MEMORY.md.j2             # 初始记忆
+    ├── HEARTBEAT.md.j2          # 心跳检查清单
+    ├── IDENTITY.md.j2           # 身份标识
+    └── skills/                  # 预装共享技能
+        └── realtime-data/
+            └── SKILL.md
+```
+
+`instance_manager._create_instance()` 在创建容器时，自动从 `workspace/` 模板渲染并写入用户 workspace。
+
+### 19.4 模板变量
+
+| 变量 | 来源 | 示例 |
+|---|---|---|
+| `{{ USER_NAME }}` | 注册信息 | "Gary" |
+| `{{ USER_LANGUAGE }}` | 用户设置 | "中文" |
+| `{{ AGENT_NAME }}` | 用户自定义或默认 | "Claw" |
+| `{{ CREATION_DATE }}` | 系统时间 | "2026-02-20" |
+| `{{ TIER }}` | 订阅等级 | "free" / "premium" |
+| `{{ ZENMUX_API_KEY }}` | 平台配置 | "sk-ai-v1-..." |
+| `{{ GATEWAY_TOKEN }}` | 随机生成 | "hex48" |
+| `{{ TAVILY_API_KEY }}` | 平台配置 | "BSAHUPck..." |
+
+### 19.5 各 Phase 配置落地清单
+
+#### Phase 0 收尾 — 配置落地
+
+| # | 任务 | 状态 | 说明 |
+|---|---|---|---|
+| 0.1 | `openclaw-free.json` 模板 | ✅ 已有 | `docker/openclaw-template-free.json`，含占位符 |
+| 0.2 | `config_generator.py` | ✅ 已有 | 根据 tier 渲染 openclaw.json |
+| 0.3 | `.env.example` 更新 | ⬜ 待做 | 补充 APNs / Tavily / OpenRouter 等新增配置项 |
+| 0.4 | `AGENTS.md` 基线模板 | ⬜ 待做 | 提取当前 test1 的 AGENTS.md 为 `.j2` 模板 |
+| 0.5 | `SOUL.md` 默认人格模板 | ⬜ 待做 | 通用友好助手人格，支持 `{{ AGENT_NAME }}` 占位 |
+| 0.6 | `USER.md` / `MEMORY.md` 占位模板 | ⬜ 待做 | 极简占位，引导 Agent 主动了解用户 |
+| 0.7 | `IDENTITY.md` 模板 | ⬜ 待做 | 含用户名、创建日期、tier 信息 |
+| 0.8 | `workspace_init()` 函数 | ⬜ 待做 | 在 `_create_instance` 中调用，渲染所有模板到 workspace |
+
+#### Phase 1 收尾 — 自主能力配置化
+
+| # | 任务 | 状态 | 说明 |
+|---|---|---|---|
+| 1.1 | `AGENTS.md` 模板增强 | ⬜ 待做 | 加入 Cron 工具说明、Safety Rules、Heartbeat 指南 |
+| 1.2 | `HEARTBEAT.md` 安全模板 | ⬜ 待做 | 24h 周期、仅记忆维护 + 状态检查，禁止高危操作 |
+| 1.3 | `cron-init.json` | ⬜ 待做 | 空 jobs 初始化，确保 CronView 不报错 |
+| 1.4 | `clawbowl.service` 模板 | ⬜ 待做 | systemd 单元纳入版本管理 |
+| 1.5 | `nginx-clawbowl.conf` 模板 | ⬜ 待做 | nginx 配置纳入版本管理 |
+| 1.6 | `.env.example` 再次更新 | ⬜ 待做 | APNs key_path / key_id / team_id 等 |
+| 1.7 | `skills/realtime-data/` 预装 | ⬜ 待做 | 实时数据技能预装到 workspace 模板 |
+
+#### Phase 2 收尾 — 多用户就绪
+
+| # | 任务 | 状态 | 说明 |
+|---|---|---|---|
+| 2.1 | `openclaw-premium.json` 完善 | ⬜ 待做 | Premium 模板差异化（更多模型、更大上下文） |
+| 2.2 | `docker-compose.yml` | ⬜ 待做 | 多容器编排（backend + nginx + 多用户实例池） |
+| 2.3 | `deploy/` 部署脚本 | ⬜ 待做 | 一键部署脚本 + 运维 Runbook |
+| 2.4 | 用户 Onboarding 问卷 | ⬜ 待做 | 首次登录收集名字/语言/偏好 → 渲染个性化模板 |
+| 2.5 | `SOUL.md` 个性化生成 | ⬜ 待做 | 根据用户偏好 LLM 生成定制人格描述 |
+| 2.6 | 共享技能库 | ⬜ 待做 | `skills/` 目录支持从 ClawHub 安装社区技能 |
+
+#### Phase 3+ 收尾 — MicroVM 与规模化
+
+| # | 任务 | 状态 | 说明 |
+|---|---|---|---|
+| 3.1 | MicroVM rootfs 镜像构建脚本 | ⬜ 待做 | 基于 Alpine/Debian 的最小根文件系统 |
+| 3.2 | `microvm-manager.py` | ⬜ 待做 | Firecracker API 替换 Docker SDK |
+| 3.3 | 用户数据迁移工具 | ⬜ 待做 | Docker bind mount → virtio-blk 迁移 |
+| 3.4 | 多 tier 资源配额配置 | ⬜ 待做 | CPU/内存/存储按 tier 差异化分配 |
+
+---
+
+## 20. 当前阶段实施优先级
+
+> 更新：2026-02-20
 
 **已完成** ✅（Phase 0 — 核心基础）：
 1. ~~容器目录结构~~
@@ -1483,19 +1614,19 @@ RUN npx playwright install --with-deps chromium
 7. ~~**对话全量持久化**~~（chat_logs 表 + SSE 中断 try/finally 保障）
 8. ~~**内容安全过滤**~~（0-chunk 检测 + filtered 事件 + 前端自动清洗 + 后端审计保留）
 9. ~~**错误包装 + LLM 故障转移**~~（openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底）
-10. ~~**文件下载功能**~~（下载 API + workspace diff + SSE file 事件 + CDN base64 内联）
+10. ~~**文件下载功能**~~（下载 API + workspace diff + SSE file 事件 + CDN base64 内联 → POST 绕过）
 11. ~~**对话区富内容展示**~~（MarkdownUI + 图片缩略图/全屏查看 + 文件卡片 + QLPreview）
 12. ~~**修复对话区刷新空白 Bug**~~（Ready Gate 机制）
-13. ~~**滚动到底部浮动按钮**~~（底部锚点 + 浮动箭头）
+13. ~~**滚动到底部浮动按钮**~~（底部锚点 + UIKit KVO 检测 + 非对称去抖）
 14. ~~**Workspace Diff 性能优化**~~（os.walk + 目录剪枝，1069ms → 1.1ms）
 15. ~~**Agent 时间感知**~~（system + user 双重日期注入，已知局限见 17.5）
-16. ~~**CDN 兼容性**~~（Cloudflare HTML 拦截 → SSE 内联 base64 绕过）
+16. ~~**CDN 兼容性**~~（Cloudflare HTML 拦截 → POST 请求绕过，适用于 cron/file API）
 
 **已完成** ✅（Phase 1 — 自主能力 + UI 优化）：
 1. ~~**Stop 按钮**~~（前端即停 SSE，后端异步 cancel）
 2. ~~**Cron + Heartbeat**~~（启用 cron 工具 + HEARTBEAT.md 24h 安全心跳 + 前端 CronView）
 3. ~~**sessions_spawn**~~（子 Agent 派生，openclaw.json 启用）
-4. ~~**前端定时任务管理 UI**~~（CronView 列表 + 状态/错误/下次执行展示）
+4. ~~**前端定时任务管理 UI**~~（CronView 列表 + 详情页 + 状态/错误/下次执行展示）
 5. ~~**proxy.py 异步 I/O**~~（httpx.AsyncClient + asyncio.to_thread，消除同步阻塞）
 6. ~~**ChatViewModel 架构重构**~~（MVVM 提取，所有业务逻辑移出 ChatView）
 7. ~~**服务端分页历史 API**~~（POST /api/v2/chat/history + 上滑加载 + 去重）
@@ -1503,11 +1634,13 @@ RUN npx playwright install --with-deps chromium
 9. ~~**容器空闲保护**~~（idle_reaper 跳过有 cron 的实例，防止误停）
 10. ~~**Gateway 自动配对**~~（instance_manager 启动时自动审批 pending 设备）
 11. ~~**APNs 推送**~~（代码完成：backend device_token + apns_service + alert_monitor + frontend NotificationManager）
+12. ~~**AGENTS.md Cron 工具指南**~~（内置 cron add/delete/list 说明，禁止系统 crontab）
 
 **Phase 1 待完成**：
 1. **APNs Apple Developer Console 配置**（用户操作：创建 p8 Key，上传服务器）
 2. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
 3. **ClawHub 技能市场**（安装社区技能到 workspace/skills/）
+4. **用户初始配置文件集落地**（详见第 19 章 Phase 0/1 收尾清单）
 
 **后续做**（Phase 2-3）：
 1. Docker 镜像安装 Chromium + Playwright
@@ -1516,17 +1649,18 @@ RUN npx playwright install --with-deps chromium
 4. 语义嵌入升级（SiliconFlow/bge 或 Tencent Youtu）
 5. AI 增强搜索（Kimi/GLM 搜索 + Tavily）
 6. 灵魂 JSON 结构化提取（soul_summary.json）
+7. **多用户配置落地**（详见第 19 章 Phase 2 收尾清单）
 
 **长期规划**（Phase 4-5）：
 1. 订阅分级 + token 计量计费
 2. 异地加密备份（OSS/S3）
 3. 多端客户端（Android/Web）
-4. **多用户 + MicroVM 改造**（详见第 21 章）
+4. **多用户 + MicroVM 改造**（详见第 21/22 章）
 5. OpenClaw 模块逐步替换
 
 ---
 
-## 20. 架构核心总结
+## 21. 架构核心总结
 
 ClawBowl 的核心不是"跑 OpenClaw"。
 
@@ -1537,7 +1671,7 @@ ClawBowl 的核心不是"跑 OpenClaw"。
 - 版本库保证安全与可控
 - OpenClaw 是当前的能力底座，但不是不可替代的依赖
 - 宿主机是服务者，不是控制者（详见 2.3 节）
-- Docker 是过渡方案，MicroVM 是终局（详见第 21 章）
+- Docker 是过渡方案，MicroVM 是终局（详见第 22 章）
 
 **核心资产（不可替代）**：
 - iOS App（用户交互层）
@@ -1555,7 +1689,7 @@ ClawBowl 的核心不是"跑 OpenClaw"。
 
 ---
 
-## 21. 容器化局限性与 MicroVM 演进路线
+## 22. 容器化局限性与 MicroVM 演进路线
 
 > 更新：2026-02-19
 
