@@ -117,6 +117,10 @@ struct ChatView: View {
     @State private var pendingReadyID: UUID?
     /// 内容过滤提示（短暂显示后自动消失）
     @State private var filteredNotice: String?
+    /// 当前活跃的流式请求任务（用于 Stop 按钮取消）
+    @State private var activeStreamTask: Task<Void, Never>?
+    /// 显示定时任务管理页面
+    @State private var showCronView = false
 
     var body: some View {
         NavigationStack {
@@ -210,10 +214,10 @@ struct ChatView: View {
                 ChatInputBar(
                     text: $inputText,
                     selectedAttachment: $selectedAttachment,
-                    isLoading: isLoading
-                ) {
-                    sendMessage()
-                }
+                    isLoading: isLoading,
+                    onSend: { sendMessage() },
+                    onStop: { cancelStream() }
+                )
             }
             .navigationTitle("ClawBowl")
             .navigationBarTitleDisplayMode(.inline)
@@ -226,11 +230,21 @@ struct ChatView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("清空") {
-                        showClearAlert = true
+                    HStack(spacing: 16) {
+                        Button {
+                            showCronView = true
+                        } label: {
+                            Image(systemName: "clock")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Button("清空") {
+                            showClearAlert = true
+                        }
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
                     }
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
                 }
             }
             .alert("清空聊天", isPresented: $showClearAlert) {
@@ -240,6 +254,9 @@ struct ChatView: View {
                 }
             } message: {
                 Text("确定要清空所有聊天记录吗？")
+            }
+            .sheet(isPresented: $showCronView) {
+                CronView()
             }
             .alert("退出登录", isPresented: $showLogoutAlert) {
                 Button("取消", role: .cancel) {}
@@ -265,7 +282,7 @@ struct ChatView: View {
         selectedAttachment = nil
         isLoading = true
 
-        Task {
+        activeStreamTask = Task {
             do {
                 // 添加用户消息
                 let displayText: String
@@ -430,6 +447,32 @@ struct ChatView: View {
                 }
             }
         }
+    }
+
+    private func cancelStream() {
+        activeStreamTask?.cancel()
+        activeStreamTask = nil
+
+        // Mark the streaming message as interrupted
+        if let lastIdx = messages.indices.last,
+           messages[lastIdx].role == .assistant && messages[lastIdx].isStreaming {
+            messages[lastIdx].isStreaming = false
+            if messages[lastIdx].content.isEmpty && !messages[lastIdx].thinkingText.isEmpty {
+                messages[lastIdx].content = messages[lastIdx].thinkingText
+                messages[lastIdx].thinkingText = ""
+            }
+            if !messages[lastIdx].content.isEmpty {
+                messages[lastIdx].content += "\n\n[已中断]"
+            } else {
+                messages[lastIdx].content = "[已中断]"
+            }
+            MessageStore.save(messages)
+        }
+
+        isLoading = false
+
+        // Fire-and-forget: notify backend to close upstream connection
+        Task { await ChatService.shared.cancelChat() }
     }
 
     private func clearChat() {

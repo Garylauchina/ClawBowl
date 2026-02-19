@@ -207,6 +207,24 @@ actor ChatService {
         }
     }
 
+    // MARK: - Stream cancellation
+
+    /// 通知后端取消当前活跃的 SSE 流（fire-and-forget，不等待响应）
+    func cancelChat() async {
+        guard let token = await AuthService.shared.accessToken else { return }
+
+        guard let url = URL(string: "https://prometheusclothing.net/api/v2/chat/cancel") else {
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 5
+
+        _ = try? await URLSession.shared.data(for: request)
+    }
+
     // MARK: - Session management
 
     /// 重置会话（请求后端销毁并重建 OpenClaw 实例）

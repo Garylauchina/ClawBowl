@@ -10,8 +10,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.database import Base, engine
-from app.routers import admin_router, auth_router, chat_router, file_router, instance_router
+from app.database import Base, async_session, engine
+from app.routers import admin_router, auth_router, chat_router, cron_router, file_router, instance_router, snapshot_router
 from app.services.instance_manager import instance_manager
 
 logging.basicConfig(
@@ -46,6 +46,30 @@ async def _health_checker() -> None:
         await asyncio.sleep(60)  # Check every minute
 
 
+async def _periodic_snapshot() -> None:
+    """Background loop that creates periodic workspace snapshots (24h cycle)."""
+    from sqlalchemy import select
+    from app.models import OpenClawInstance
+    from app.services.snapshot_service import cleanup_snapshots, create_snapshot
+
+    await asyncio.sleep(60)  # Let the system warm up first
+    while True:
+        try:
+            async with async_session() as db:
+                result = await db.execute(select(OpenClawInstance))
+                instances = result.scalars().all()
+                for inst in instances:
+                    try:
+                        await create_snapshot(inst, source="periodic")
+                        await cleanup_snapshots(inst, keep_count=3)
+                        logger.info("Periodic snapshot created for %s", inst.container_name)
+                    except Exception:
+                        logger.exception("Periodic snapshot failed for %s", inst.container_name)
+        except Exception:
+            logger.exception("Periodic snapshot loop error")
+        await asyncio.sleep(86400)  # 24 hours
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup / shutdown lifecycle."""
@@ -60,12 +84,14 @@ async def lifespan(app: FastAPI):
     # Start background tasks
     idle_task = asyncio.create_task(_idle_reaper())
     health_task = asyncio.create_task(_health_checker())
+    snapshot_task = asyncio.create_task(_periodic_snapshot())
 
     yield
 
     # Shutdown
     idle_task.cancel()
     health_task.cancel()
+    snapshot_task.cancel()
     logger.info("ClawBowl Orchestrator shutting down")
 
 
@@ -90,6 +116,8 @@ app.include_router(auth_router.router)
 app.include_router(chat_router.router)
 app.include_router(file_router.router)
 app.include_router(instance_router.router)
+app.include_router(snapshot_router.router)
+app.include_router(cron_router.router)
 app.include_router(admin_router.router)
 
 

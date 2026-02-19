@@ -21,7 +21,7 @@ from app.database import async_session, get_db
 from app.models import ChatLog, User
 from app.schemas import ChatRequest
 from app.services.instance_manager import instance_manager
-from app.services.proxy import proxy_chat_request, proxy_chat_stream
+from app.services.proxy import cancel_user_stream, proxy_chat_request, proxy_chat_stream
 
 logger = logging.getLogger("clawbowl.chat")
 
@@ -146,6 +146,15 @@ async def _logged_stream(
 
 
 # ── Endpoints ────────────────────────────────────────────────────────
+
+@router.post("/chat/cancel")
+async def cancel_chat(
+    user: User = Depends(get_current_user),
+):
+    """Cancel the user's active SSE stream (fire-and-forget from frontend)."""
+    cancelled = cancel_user_stream(user.id)
+    return {"cancelled": cancelled}
+
 
 @router.get("/chat/warmup")
 async def warmup(

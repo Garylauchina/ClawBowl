@@ -33,6 +33,22 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "zenmux/deepseek/deepseek-chat"
 
+# ── Per-user active stream cancellation ──────────────────────────────
+# Maps user_id → asyncio.Event.  When set(), the streaming generator
+# breaks out of its loop and closes the upstream httpx connection.
+_active_streams: dict[str, asyncio.Event] = {}
+
+
+def cancel_user_stream(user_id: str) -> bool:
+    """Signal the active stream for *user_id* to stop.  Returns True if
+    there was an active stream to cancel."""
+    ev = _active_streams.get(user_id)
+    if ev is not None:
+        ev.set()
+        logger.info("Cancel signal sent for user %s", user_id)
+        return True
+    return False
+
 # ── User-friendly error messages ─────────────────────────────────────
 # Map technical errors to messages shown in the chat bubble.
 
@@ -261,6 +277,13 @@ def _preprocess_attachments(
     return _rebuild_messages_with_file_refs(messages, file_paths)
 
 
+async def _preprocess_attachments_async(
+    instance: OpenClawInstance, messages: list[dict]
+) -> list[dict]:
+    """Async version that offloads blocking file I/O to a thread."""
+    return await asyncio.to_thread(_preprocess_attachments, instance, messages)
+
+
 # ── Shared constants ──────────────────────────────────────────────────
 
 _REQ_TIMEOUT = httpx.Timeout(connect=30, read=300, write=30, pool=30)
@@ -339,7 +362,7 @@ async def proxy_chat_request(
     stream: bool = False,
 ) -> dict:
     """Forward a chat completion request to the user's OpenClaw gateway (non-streaming)."""
-    messages = _preprocess_attachments(instance, messages)
+    messages = await _preprocess_attachments_async(instance, messages)
     messages = _inject_date_context(messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream)
 
@@ -513,13 +536,17 @@ async def proxy_chat_stream(
     4. [DONE] / finish_reason:"stop" → 将最后一轮缓冲作为 content 发送（正式回答）
     5. 客户端收到 content → 清除 thinking，只保留最终结果
     """
-    messages = _preprocess_attachments(instance, messages)
+    messages = await _preprocess_attachments_async(instance, messages)
     messages = _inject_date_context(messages)
     url, headers, body = _build_request_parts(instance, messages, model, stream=True)
 
     # Workspace snapshot before the stream (for file detection at end)
     workspace_dir = Path(instance.data_path) / "workspace"
-    ws_before = _snapshot_workspace(workspace_dir)
+    ws_before = await asyncio.to_thread(_snapshot_workspace, workspace_dir)
+
+    # Register cancel event for this user's stream
+    cancel_event = asyncio.Event()
+    _active_streams[instance.user_id] = cancel_event
 
     seen_tools: set[str] = set()
     content_buf: list[str] = []   # buffer content for current turn
@@ -539,6 +566,16 @@ async def proxy_chat_stream(
                 async with client.stream("POST", url, json=body, headers=headers) as resp:
                     resp.raise_for_status()
                     async for raw_line in resp.aiter_lines():
+                        # ── Check for user-initiated cancel ──
+                        if cancel_event.is_set():
+                            logger.info("Stream cancelled by user %s", instance.user_id)
+                            if content_buf:
+                                partial = "".join(content_buf).strip()
+                                if partial:
+                                    yield _make_content_chunk(partial)
+                            yield _make_content_chunk("\n\n[已中断]")
+                            yield "data: [DONE]\n\n"
+                            return
                         line = raw_line.strip()
                         if not line:
                             continue
@@ -573,9 +610,9 @@ async def proxy_chat_stream(
                                 if final:
                                     yield _make_content_chunk(final)
 
-                            # ── File detection: workspace diff ──
-                            ws_after = _snapshot_workspace(workspace_dir)
-                            new_files = _diff_workspace(ws_before, ws_after, workspace_dir)
+                            # ── File detection: workspace diff (offloaded to thread) ──
+                            ws_after = await asyncio.to_thread(_snapshot_workspace, workspace_dir)
+                            new_files = await asyncio.to_thread(_diff_workspace, ws_before, ws_after, workspace_dir)
                             if new_files:
                                 logger.info(
                                     "Workspace diff: %d new/modified file(s): %s",
@@ -591,6 +628,7 @@ async def proxy_chat_stream(
                                 chunk_count, turn_count, len(seen_tools),
                                 len(new_files) if new_files else 0,
                             )
+                            _active_streams.pop(instance.user_id, None)
                             return
 
                         if not line.startswith("data: "):
@@ -724,3 +762,5 @@ async def proxy_chat_stream(
     friendly_msg = _ERROR_MESSAGES.get(error_cat, _ERROR_MESSAGES["unknown"])
     logger.error("Returning friendly error to client: %s (original: %s)", friendly_msg, last_exc)
     yield _make_error_chunk(friendly_msg)
+    # Cleanup cancel event for this user
+    _active_streams.pop(instance.user_id, None)

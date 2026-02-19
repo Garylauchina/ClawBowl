@@ -145,7 +145,9 @@ class InstanceManager:
         data_path = Path(settings.openclaw_data_dir) / user.id
         config_dir = data_path / "config"
         workspace_dir = data_path / "workspace"
+        snapshots_dir = data_path / "snapshots"
         workspace_dir.mkdir(parents=True, exist_ok=True)
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
 
         # Write per-user openclaw.json
         write_config(user, gateway_token, config_dir)

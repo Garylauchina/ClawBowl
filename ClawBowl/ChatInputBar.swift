@@ -10,6 +10,7 @@ struct ChatInputBar: View {
     @Binding var selectedAttachment: Attachment?
     let isLoading: Bool
     let onSend: () -> Void
+    var onStop: (() -> Void)?
 
     @FocusState private var isFocused: Bool
     @State private var showImagePicker = false
@@ -74,8 +75,17 @@ struct ChatInputBar: View {
                         }
                     }
 
-                // 语音按钮 / 发送按钮（智能切换）
-                if canSend {
+                // Stop / 发送 / 语音 按钮（智能切换）
+                if isLoading {
+                    // AI 处理中 → Stop 按钮
+                    Button {
+                        onStop?()
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 34))
+                            .foregroundStyle(.red)
+                    }
+                } else if canSend {
                     // 有内容时显示发送按钮
                     Button(action: onSend) {
                         Image(systemName: "arrow.up.circle.fill")
@@ -90,9 +100,7 @@ struct ChatInputBar: View {
                         .frame(width: 34, height: 34)
                         .background(speechManager.isRecording ? Color.red.opacity(0.15) : Color.clear)
                         .clipShape(Circle())
-                        .opacity(isLoading ? 0.4 : 1.0)
                         .gesture(
-                            isLoading ? nil :
                             DragGesture(minimumDistance: 0)
                                 .onChanged { _ in
                                     if !speechManager.isRecording {
@@ -219,11 +227,11 @@ struct ChatInputBar: View {
         .background(Color(.systemGray6).opacity(0.5))
     }
 
-    /// 有文字或有附件即可发送
+    /// 有文字或有附件即可发送（isLoading 时由 Stop 按钮接管，不走此分支）
     private var canSend: Bool {
         let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let hasAttachment = selectedAttachment != nil
-        return (hasText || hasAttachment) && !isLoading
+        return hasText || hasAttachment
     }
 
     /// 根据 MIME type 返回合适的 SF Symbol
@@ -564,7 +572,7 @@ class SpeechRecognitionManager: ObservableObject {
 #Preview {
     VStack {
         Spacer()
-        ChatInputBar(text: .constant(""), selectedAttachment: .constant(nil), isLoading: false) {}
-        ChatInputBar(text: .constant(""), selectedAttachment: .constant(nil), isLoading: true) {}
+        ChatInputBar(text: .constant(""), selectedAttachment: .constant(nil), isLoading: false, onSend: {})
+        ChatInputBar(text: .constant(""), selectedAttachment: .constant(nil), isLoading: true, onSend: {}, onStop: {})
     }
 }

@@ -50,7 +50,7 @@
       },
       "workspace": "/data/workspace",
       "maxConcurrent": 1,
-      "subagents": { "maxConcurrent": 1 }
+      "subagents": { "maxConcurrent": 2 }
     }
   },
   "channels": {},
