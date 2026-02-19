@@ -92,6 +92,7 @@ class InstanceManager:
     async def stop_idle_instances(self) -> int:
         """Stop instances that have been idle longer than the configured timeout.
 
+        Skips instances that have active cron jobs.
         Returns the number of instances stopped.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(
@@ -107,6 +108,9 @@ class InstanceManager:
             )
             idle_instances = result.scalars().all()
             for inst in idle_instances:
+                if self._has_active_cron_jobs(inst):
+                    logger.debug("Skipping idle stop for %s (has cron jobs)", inst.container_name)
+                    continue
                 try:
                     await self._stop_container(inst)
                     inst.state = "stopped"
@@ -116,6 +120,18 @@ class InstanceManager:
                     logger.exception("Failed to stop idle instance %s", inst.container_name)
             await db.commit()
         return stopped
+
+    def _has_active_cron_jobs(self, instance: OpenClawInstance) -> bool:
+        """Check if the instance has any enabled cron jobs."""
+        import json as _json
+        jobs_path = Path(instance.config_path) / "cron" / "jobs.json"
+        if not jobs_path.exists():
+            return False
+        try:
+            data = _json.loads(jobs_path.read_text())
+            return any(j.get("enabled", True) for j in data.get("jobs", []))
+        except Exception:
+            return False
 
     async def health_check_all(self) -> dict[str, str]:
         """Check health of all 'running' instances. Returns {container_name: status}."""
