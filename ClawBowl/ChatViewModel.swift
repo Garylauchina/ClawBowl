@@ -170,36 +170,35 @@ final class ChatViewModel: ObservableObject {
 
                 let userMessage = Message(role: .user, content: displayText, attachment: attachment)
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    messages.append(userMessage)
+                    self.messages.append(userMessage)
                 }
 
                 let placeholderMessage = Message(role: .assistant, content: "", isStreaming: true)
                 let placeholderID = placeholderMessage.id
 
-                pendingReadyID = placeholderID
+                self.pendingReadyID = placeholderID
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    messages.append(placeholderMessage)
+                    self.messages.append(placeholderMessage)
                 }
 
-                // Cache the streaming index (O(1) access during stream)
-                streamingIdx = messages.count - 1
+                self.streamingIdx = self.messages.count - 1
 
                 await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    if pendingReadyID == nil {
+                    if self.pendingReadyID == nil {
                         cont.resume()
                     } else {
-                        readyContinuation = cont
+                        self.readyContinuation = cont
                         Task { @MainActor in
                             try? await Task.sleep(nanoseconds: 500_000_000)
-                            guard readyContinuation != nil else { return }
-                            readyContinuation?.resume()
-                            readyContinuation = nil
-                            pendingReadyID = nil
+                            guard self.readyContinuation != nil else { return }
+                            self.readyContinuation?.resume()
+                            self.readyContinuation = nil
+                            self.pendingReadyID = nil
                         }
                     }
                 }
 
-                let historyMessages = Array(messages.dropLast(2))
+                let historyMessages = Array(self.messages.dropLast(2))
 
                 let stream = try await ChatService.shared.sendMessageStream(
                     content,
@@ -248,16 +247,16 @@ final class ChatViewModel: ObservableObject {
                 // Stream ended
                 flushThrottleNow(idx: streamingIdx)
                 if wasFiltered {
-                    let removeCount = min(messages.count, 4)
-                    messages.removeLast(removeCount)
-                    MessageStore.save(messages)
+                    let removeCount = min(self.messages.count, 4)
+                    self.messages.removeLast(removeCount)
+                    MessageStore.save(self.messages)
                     withAnimation(.easeInOut(duration: 0.3)) {
-                        filteredNotice = "检测到内容限制，已自动清理相关对话，请继续"
+                        self.filteredNotice = "检测到内容限制，已自动清理相关对话，请继续"
                     }
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 4_000_000_000)
                         withAnimation(.easeInOut(duration: 0.5)) {
-                            filteredNotice = nil
+                            self.filteredNotice = nil
                         }
                     }
                 } else {
@@ -288,7 +287,7 @@ final class ChatViewModel: ObservableObject {
                 } else {
                     let errorMessage = Message(role: .assistant, content: friendlyMsg, status: .error)
                     withAnimation(.easeInOut(duration: 0.2)) {
-                        messages.append(errorMessage)
+                        self.messages.append(errorMessage)
                     }
                 }
                 isLoading = false
