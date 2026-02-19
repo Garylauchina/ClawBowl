@@ -18,6 +18,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         let coord = context.coordinator
+        coord.parent = self
         if coord.scrollView == nil {
             DispatchQueue.main.async { coord.attach(from: uiView) }
         }
@@ -28,7 +29,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
     }
 
     class Coordinator {
-        let parent: ScrollPositionHelper
+        var parent: ScrollPositionHelper
         weak var scrollView: UIScrollView?
         var observation: NSKeyValueObservation?
         var lastAtBottom = true
@@ -69,12 +70,19 @@ struct ScrollPositionHelper: UIViewRepresentable {
 
         private func notifyChange(_ atBottom: Bool) {
             pendingNotify?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self else { return }
-                self.parent.isAtBottom = atBottom
+            pendingNotify = nil
+            if atBottom {
+                DispatchQueue.main.async {
+                    self.parent.isAtBottom = true
+                }
+            } else {
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.parent.isAtBottom = false
+                }
+                pendingNotify = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
             }
-            pendingNotify = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
         }
 
         func stopMomentum() {
@@ -199,7 +207,6 @@ struct ChatView: View {
             if !isAtBottom {
                 Button {
                     stopMomentumTrigger &+= 1
-                    isAtBottom = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                         if let proxy = scrollProxy, let lastID = viewModel.messages.last?.id {
                             proxy.scrollTo(lastID, anchor: .bottom)
@@ -273,7 +280,6 @@ struct ChatView: View {
         guard let lastID = viewModel.messages.last?.id else { return }
         DispatchQueue.main.async {
             proxy.scrollTo(lastID, anchor: .bottom)
-            isAtBottom = true
         }
     }
 }
