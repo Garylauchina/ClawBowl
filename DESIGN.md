@@ -1,6 +1,6 @@
-# ClawBowl 系统设计文档（V5）
+# ClawBowl 系统设计文档（V6）
 
-> 最后更新：2026-02-18
+> 最后更新：2026-02-19
 
 ---
 
@@ -56,6 +56,40 @@ ClawBowl 是一个面向普通用户的托管式 OpenClaw 运行平台。
 - 多模态文件处理（image 工具、media understanding）
 
 容器对用户而言是"数字灵魂"的载体。
+
+### 2.3 架构哲学：宿主机作为服务者
+
+> 更新：2026-02-19
+
+**核心原则：宿主机是服务者，不是控制者。容器内的 Agent 实例如何演化，宿主机不干预。**
+
+```
+┌─ iOS App ──────────────────────────────────────────────┐
+│  ChatView / ChatViewModel / NotificationManager        │
+└────────────────────────────────────────────────────────┘
+           ↕ HTTPS + SSE
+┌─ 宿主机 Backend（服务者）──────────────────────────────┐
+│  职责：                                                 │
+│  ├─ 用户管理、认证                                      │
+│  ├─ 容器生命周期维护（启动/停止/升级/恢复）               │
+│  ├─ 对话全量持久化（chat_logs 表）                       │
+│  ├─ 数据/记忆备份（Snapshot）                           │
+│  ├─ 消息路由（proxy.py → OpenClaw API）                 │
+│  ├─ APNs 推送转发（alert_monitor → Apple）              │
+│  └─ 文件中转（workspace bind mount）                    │
+│  不做：                                                 │
+│  ├─ 不修改容器内部状态                                   │
+│  ├─ 不注入 Agent 行为规则（AGENTS.md 由 Agent 自行维护） │
+│  └─ 不干预 Agent 的技能/记忆演化                         │
+└────────────────────────────────────────────────────────┘
+           ↕ HTTP (OpenAI 兼容 API)
+┌─ OpenClaw Container（数字灵魂）───────────────────────┐
+│  完全自治：Agent 自主管理 AGENTS.md / MEMORY.md / skills │
+│  宿主机零侵入：仅通过 API 通信 + bind mount 持久化       │
+└────────────────────────────────────────────────────────┘
+```
+
+**零侵入原则**：宿主机对容器的唯一交互方式是 HTTP API 和 bind mount。不直接修改容器内文件（如 AGENTS.md），不在容器内安装额外软件。这确保 OpenClaw 可平滑升级，Agent 的演化完全自主。
 
 ---
 
@@ -114,9 +148,13 @@ cache/                           # 临时缓存
 
 ```
 宿主机                                              容器内
-/var/lib/clawbowl/runtimes/{rid}/soul/         →   /root/.openclaw/
-/var/lib/clawbowl/runtimes/{rid}/workspace/    →   /root/.openclaw/workspace
+/var/lib/clawbowl/{user_id}/config/            →   /data/config/        （openclaw.json, cron/jobs.json）
+/var/lib/clawbowl/{user_id}/workspace/         →   /data/workspace/     （Agent 工作区）
+/var/lib/clawbowl/{user_id}/sessions/          →   /data/sessions/      （会话记录）
+/var/lib/clawbowl/{user_id}/snapshots/         →   宿主机独占            （备份快照，不挂入容器）
 ```
+
+> 注：设计文档第 5 节使用 `{rid}`（runtime_id）作为路径标识，当前单用户阶段实际使用 `{user_id}`。多用户阶段将统一为 `{rid}`。
 
 ---
 
@@ -561,9 +599,11 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 
 | 问题 | 根因分析 | 修复方案 | 状态 |
 |---|---|---|---|
-| **对话区偶尔刷新空白** | 用户点击发送后，前端同时做两件事：① 添加用户消息 + 占位气泡（触发 SwiftUI 重绘 + 动画）；② 立即发起 SSE 请求。后端推理事件在前端重绘未完成时就开始涌入，造成 `LazyVStack` 在 reconciliation 期间短暂清空 | **Ready Gate 机制**：前端必须处于 "ready" 状态后才向后端发请求。具体实现：占位气泡 `onAppear` 作为 ready 信号 → `CheckedContinuation` 等待 → 确认气泡已渲染 → 才发起 SSE 流式请求。附带 500ms 安全超时防死锁。同时流式滚动使用无动画模式避免队列堆积 | ✅ 已修复 |
-
-> **设计哲学**：以用户体验为第一诉求。不在前端未就绪时浪费后端资源，省下的算力留给未来的记忆机制。如果 ready gate 不足以解决流式期间的卡顿，再考虑加入事件节流机制。
+| **对话区偶尔刷新空白** | 占位气泡未渲染完毕时 SSE 事件涌入，LazyVStack reconciliation 期间短暂清空 | **Ready Gate 机制**：占位气泡 `onAppear` → `CheckedContinuation` 等待 → 确认渲染 → 才发起 SSE。附带 500ms 超时防死锁 + 无动画滚动 | ✅ |
+| **流式渲染卡顿** | 每个 SSE chunk 触发一次 `@State` 变更 + O(n) 查找 + Attachment.data 参与 Equatable diff | **100ms 节流** + **缓存索引** + **自定义 Equatable**（排除二进制数据），详见 9.8 | ✅ |
+| **启动时键盘弹出卡顿** | 首次 build 后的初始化开销（MessageStore 同步加载、视图渲染） | MessageStore 改为异步加载 + ChatViewModel 惰性初始化 | ✅ |
+| **CDN 拦截 Cron API** | Cloudflare 对 GET `/api/v2/cron/jobs` 返回 HTML 屏蔽页 | 改为 POST 请求绕过 CDN | ✅ |
+| **容器被误停** | idle_reaper 30min 超时停止容器，Docker unless-stopped 策略失效 | idle_reaper 检查 cron jobs，有活跃任务不停止 | ✅ |
 
 ### 9.7 滚动到底部浮动按钮
 
@@ -573,19 +613,40 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 - **UI 设计**：36×36 圆形按钮，`chevron.down` 图标，半透明主题色背景 + 阴影，出现/消失带 opacity + scale 动画
 - **滚动行为**：点击按钮触发带动画的 `scrollTo("bottom-anchor")`，滚动完成后按钮自动消失
 
-### 9.8 前端性能优化（流式渲染）
+### 9.8 前端性能优化 ✅
 
-> 更新：2026-02-17
+> 更新：2026-02-19。全部已实现。
 
-流式 SSE 期间，每个 chunk 都触发 SwiftUI 状态变更、全量 Equatable diff 和滚动，导致 UI 卡顿。通过以下优化将 UI 更新频率从每 chunk 一次降至约 10 次/秒：
+参考 Telegram 的海量消息管理方案，通过 MVVM 架构重构 + 多层性能优化，实现数千条消息流畅滚动：
 
-| 优化项 | 问题 | 方案 | 效果 |
-|---|---|---|---|
-| **流式节流** | 每个 SSE chunk 触发一次 `@State` 变更 | 本地缓冲 `pendingContent/pendingThinking`，每 100ms 批量刷新一次 UI | 更新频率降 90%+ |
-| **缓存索引** | 每个 chunk 做 O(n) `firstIndex` 查找 | placeholder append 后缓存 `cachedIdx = messages.count - 1` | O(1) 直接访问 |
-| **自定义 Equatable** | `Message` 默认 Equatable 比较 `Attachment.data`（大二进制） | 自定义 `==`：仅比较 `id, content, thinkingText, status, isStreaming, role` | diff 成本降 90%+ |
-| **图片异步解码** | `UIImage(data:)` 在 body 内同步解码阻塞主线程 | 改用 `@State decodedImage` + `.task` 后台解码 + 占位 ProgressView | 主线程零阻塞 |
-| **MessageStore 异步加载** | `@State` 初始化时同步 `FileManager.read` | 改为空数组初始化 + `.task { MessageStore.load() }` | 启动不卡顿 |
+**架构重构（ChatViewModel）**：
+
+从 ChatView 中提取全部业务逻辑到 `ChatViewModel`（`ObservableObject`），ChatView 退化为纯展示层：
+
+```
+ChatView（纯 UI）
+  └── @StateObject ChatViewModel（业务逻辑）
+        ├── messages: [Message]          ← 唯一数据源
+        ├── sendMessage()                ← 发送 + SSE 流处理
+        ├── cancelStream()               ← Stop 按钮
+        ├── loadInitialHistory()         ← 启动时同步服务端
+        ├── loadOlderMessages()          ← 上滑分页加载
+        ├── pendingContent/Thinking      ← 100ms 节流缓冲
+        └── streamingIdx                 ← O(1) 缓存索引
+```
+
+**性能优化清单**：
+
+| 优化项 | 问题 | 方案 | 效果 | 状态 |
+|---|---|---|---|---|
+| **ChatViewModel 提取** | ChatView 同时承担 UI 渲染和业务逻辑，职责混杂 | 所有逻辑移入 ObservableObject，ChatView 仅做声明式 UI | 逻辑集中、可测试、避免意外重绘 | ✅ |
+| **流式节流** | 每个 SSE chunk 触发一次 `@Published` 变更 | 本地缓冲 `pendingContent/pendingThinking`，每 100ms 批量刷新一次 UI | 更新频率降 90%+ | ✅ |
+| **缓存索引** | 每个 chunk 做 O(n) `firstIndex` 查找 | placeholder append 后缓存 `streamingIdx` | O(1) 直接访问 | ✅ |
+| **自定义 Equatable** | `Message` 默认 Equatable 比较 `Attachment.data`（大二进制） | 自定义 `==`：仅比较 `id, content, thinkingText, status, isStreaming, files.count` | diff 成本降 90%+ | ✅ |
+| **图片异步解码** | `UIImage(data:)` 在 body 内同步解码阻塞主线程 | 改用 `@State decodedImage` + `.task` 后台解码 + 占位 ProgressView | 主线程零阻塞 | ✅ |
+| **MessageStore 异步加载** | `@State` 初始化时同步 `FileManager.read` | 改为空数组初始化 + `.task { MessageStore.load() }` | 启动不卡顿 | ✅ |
+| **服务端分页** | 本地缓存 50 条消息上限，历史不可回溯 | `POST /api/v2/chat/history` 分页 API + 上滑触发 `loadOlderMessages()` | 无限历史回溯 | ✅ |
+| **UI 精简** | toolbar 多个按钮占空间 | 合并为头像 Menu（定时任务 + 退出登录） | 界面更简洁 | ✅ |
 
 ### 9.9 内容安全过滤
 
@@ -603,18 +664,25 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 
 ## 10. 前端上下文管理
 
+> 更新：2026-02-19。ChatViewModel + 分页 API 已实现。
+
 ### 10.1 架构（混合方案）
 
-- **权威数据源**：OpenClaw 容器内的会话记录（`agents/main/sessions/`）
-- **后端 API**：`GET /api/v2/chat/history?limit=20&before={timestamp}` 从容器读取
-- **iOS 本地缓存**：SwiftData 持久化，按用户隔离
+- **权威数据源**：后端 `chat_logs` 表（全量对话持久化）
+- **后端分页 API**：`POST /api/v2/chat/history`（POST 绕过 CDN 拦截），Body: `{limit, before, after}`
+  - 从 `chat_logs` 表按 `user_id + created_at DESC` 分页查询
+  - 自动过滤 `status='filtered'` 的记录
+  - 返回 `{messages: [...], has_more: bool}`
+  - 每条消息含 `event_id` 用于前后端去重
+- **iOS 本地缓存**：MessageStore JSON 文件持久化（200 条上限），作为快速启动缓存
 
 ### 10.2 交互流程
 
-- **登录时**：先显示本地缓存（毫秒级），后台静默同步最新会话
-- **发消息时**：同步写入本地缓存 + 发送后端
-- **上滑加载**：分页从后端拉取更早消息
-- **本地缓存上限**：200 条，更早的按需从后端拉取
+- **启动时**：先从本地 JSON 缓存加载（毫秒级），后台静默调用 history API 同步差量
+- **发消息时**：ChatViewModel 管理内存 + 完成后写入本地 JSON 缓存
+- **上滑加载**：顶部消息 `onAppear` 触发 `loadOlderMessages()` → 调用 history API `before={最老时间戳}`
+- **本地缓存上限**：200 条，更早的按需从后端分页拉取
+- **去重机制**：后端返回 `event_id`，iOS 端用 `Message.eventId` 与本地消息匹配，避免重复
 
 ### 10.3 后端对话全量持久化
 
@@ -650,7 +718,7 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 
 **后续用途：**
 
-- `GET /api/v2/chat/history` — 分页拉取历史（替代前端 50 条本地缓存限制）
+- ✅ `POST /api/v2/chat/history` — 分页拉取历史（已替代前端 50 条本地缓存限制，扩展至 200 条本地 + 无限服务端分页）
 - 按 user_id + 时间范围统计对话量/token 消耗
 - 为记忆梳理机制提供原始语料库（自动提取关键信息 → MEMORY.md）
 
@@ -922,7 +990,7 @@ ClawBowl 的三层架构天然保证了隔离性：
 
 | 层 | 技术 |
 |----|------|
-| iOS 客户端 | SwiftUI + SwiftData + PhotosUI |
+| iOS 客户端 | SwiftUI + MessageStore (JSON) + PhotosUI |
 | 后端控制面 | Python FastAPI + SQLAlchemy + Docker SDK |
 | 执行面 | OpenClaw Gateway (Node.js) in Docker |
 | 反向代理 | Nginx + Let's Encrypt |
@@ -1274,38 +1342,39 @@ Agent 行为：
 | 记忆系统 | MEMORY.md + memory/ 日记 + memory_search | ✅ |
 | 工具记忆 | TOOLS.md 自动更新 | ✅ |
 | 推理展示 | thinking 浅色字体 + 最终 content 分离 | ✅ |
-| **前端流式性能优化** | SSE 节流（100ms 批量刷新）+ 自定义 Equatable + 图片异步解码 + 异步加载 | ✅ |
-| **对话全量持久化** | chat_logs 表：user_id / event_id / 对话原文 / 工具调用 / 文件指针 / 状态；SSE 中断亦持久化（try/finally） | ✅ |
-| **内容安全过滤** | 0-chunk 检测 → filtered 事件 → 前端自动清洗上下文 + 后端保留审计记录 | ✅ |
-| **文件下载** | workspace diff → SSE file 事件 → 前端 FileCardView + QLPreview + ShareSheet | ✅ |
-| **图片内联展示** | SSE file 事件携带 base64 内联数据（≤512KB），前端直接解码为缩略图，点击全屏查看原图 | ✅ |
-| **Markdown 富文本渲染** | MarkdownUI 2.4.1，assistant 消息渲染 Markdown（代码块/标题/链接/引用），自定义 clawBowlAssistant 主题 | ✅ |
-| **Workspace Diff 优化** | os.walk + 目录剪枝（排除 venv/node_modules 等），快照性能从 1069ms → 1.1ms | ✅ |
-| **Agent 时间感知** | system 消息 + 用户消息双重注入当前 UTC 日期/年份（已知局限见 17.5 节） | ✅ |
-| **CDN 兼容性** | Cloudflare 拦截 GET 文件请求 → 改为 SSE 内联 base64 传输图片，彻底绕过 CDN | ✅ |
-| **错误包装 + LLM 故障转移** | openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底 | ✅ |
+| 对话全量持久化 | chat_logs 表 + event_id 关联 + SSE 中断 try/finally 保障 | ✅ |
+| 内容安全过滤 | 0-chunk 检测 → filtered 事件 → 前端自动清洗 + 后端审计 | ✅ |
+| 文件下载 | workspace diff → SSE file 事件 → FileCardView + QLPreview | ✅ |
+| 图片内联展示 | SSE file 事件 base64（≤512KB）→ 缩略图 + 全屏查看 | ✅ |
+| Markdown 渲染 | MarkdownUI 2.4.1 + clawBowlAssistant 自定义主题 | ✅ |
+| Workspace Diff 优化 | os.walk + 目录剪枝，1069ms → 1.1ms | ✅ |
+| Agent 时间感知 | system + user 双重日期注入（局限见 17.5） | ✅ |
+| CDN 兼容性 | Cloudflare 拦截 → SSE 内联 base64 绕过 | ✅ |
+| 错误包装 + LLM 故障转移 | openclaw.json fallbacks + proxy.py 包装 | ✅ |
 
-### Phase 1 — 自主能力 + 基础备份（下一步）
+### Phase 1 — 自主能力 + 基础备份 + UI 优化（进行中）
 
-目标：agent 从"被动回答"进化为"主动行动"，同时建立数据安全网。
+目标：agent 从"被动回答"进化为"主动行动"，同时建立数据安全网，前端性能接近 Telegram 水准。
 
-| 能力 | 实现方式 | 前端改动 | 后端改动 | 优先级 |
+| 能力 | 实现方式 | 前端改动 | 后端改动 | 状态 |
 |---|---|---|---|---|
 | ~~**文件下载**~~ | 下载 API + SSE file 事件（详见 8.4） | FileCardView + 预览/分享 | `/api/v2/files/download` + workspace diff | ✅ 已完成 |
 | ~~**对话区富内容展示**~~ | MarkdownUI 渲染 + 图片内联 + 文件卡片 | Markdown 主题 + FileCardView + FileDownloader | SSE file delta 注入 | ✅ 已完成 |
-| **基础 Snapshot** | tar.zst + manifest.json（详见第 6 章） | 无 | 定时任务 + 控制面 API | ⭐⭐⭐ |
-| **Cron 定时任务** | 启用 cron 工具 + HEARTBEAT.md | 添加"定时任务"管理 UI | openclaw.json 启用 cron | ⭐⭐⭐ |
-| **Heartbeat 心跳** | 配置 heartbeat 周期 | 无（后台自动） | HEARTBEAT.md 配置检查项 | ⭐⭐⭐ |
-| **Stop 按钮** | 中断 SSE 流 + 取消后端请求 | 推理气泡旁 ■ 按钮 | `/api/v2/chat/cancel` | ⭐⭐⭐ |
 | ~~**对话区空白修复**~~ | Ready Gate：占位气泡 onAppear → 才发请求 | ChatView ready gate + 无动画滚动 | 无 | ✅ 已完成 |
 | ~~**滚动到底部按钮**~~ | 底部锚点 + 浮动箭头 | ChatView 悬浮按钮 | 无 | ✅ 已完成 |
-| **子 Agent 派生** | sessions_spawn（ping-pong） | 无（透明执行） | 启用 session tools | ⭐⭐ |
-| **APNs 系统推送** | APNs HTTP/2 + JWT + alert_monitor | NotificationManager + AppDelegate | apns_service + alert_monitor + device_token API | ⭐⭐⭐ |
-| **ClawHub 技能** | 安装社区技能到 workspace/skills/ | 添加"技能市场"入口 | 无（agent 自行安装） | ⭐⭐ |
+| ~~**Stop 按钮**~~ | 中断 SSE 流 + 取消后端请求 | 推理气泡旁 ■ 按钮 | `/api/v2/chat/cancel` | ✅ 已完成 |
+| ~~**Cron 定时任务**~~ | 启用 cron 工具 + 前端管理 UI | CronView 列表 + 状态展示 | cron_router 读 jobs.json + gateway 自动配对 | ✅ 已完成 |
+| ~~**Heartbeat 心跳**~~ | 配置 heartbeat 周期（24h 简化版） | 无（后台自动） | HEARTBEAT.md 安全规则 | ✅ 已完成 |
+| ~~**子 Agent 派生**~~ | sessions_spawn（ping-pong） | 无（透明执行） | openclaw.json 启用 session tools | ✅ 已完成 |
+| ~~**ChatViewModel 架构重构**~~ | MVVM 提取 + 流式节流 + 缓存索引 | ChatViewModel ObservableObject | 无 | ✅ 已完成 |
+| ~~**服务端分页历史**~~ | POST history API + 上滑加载 | ChatView 双向滚动 | `POST /api/v2/chat/history` | ✅ 已完成 |
+| ~~**UI 精简**~~ | toolbar 头像 Menu（定时任务 + 退出） | 替换多按钮为头像菜单 | 无 | ✅ 已完成 |
+| **基础 Snapshot** | tar.zst + manifest.json（详见第 6 章） | 无 | 定时任务 + 控制面 API | 待实现 |
+| **APNs 系统推送** | APNs HTTP/2 + JWT + alert_monitor | NotificationManager + AppDelegate | apns_service + alert_monitor + device_token API | 代码完成，待 Apple Developer Console 配置 |
+| **ClawHub 技能** | 安装社区技能到 workspace/skills/ | 添加"技能市场"入口 | 无（agent 自行安装） | 待实现 |
+| **proxy.py 异步 I/O** | httpx.AsyncClient + asyncio.to_thread | 无 | proxy.py 同步 I/O → 异步 | ✅ 已完成 |
 
-> **为什么基础备份必须在 Phase 1？** 启用 cron/heartbeat 后 Agent 开始自主行动，如果出错必须能回滚。没有备份就启用自动化 = 裸奔。
-
-> **为什么 APNs 推送是 Phase 1 核心能力？** OpenClaw 挂接 Telegram/Discord 等聊天平台时，推送能力完全受限于第三方——Agent 只能在对话流中回复，用户必须主动打开聊天窗口才能看到。独占 App + APNs 实现了系统级通知（锁屏、横幅、通知中心），这是 ClawBowl 相对于"OpenClaw + 任何第三方聊天工具"方案的**不可替代差异化能力**，是 Agent 从"被动问答"到"主动服务"的关键闭环。
+> **为什么 APNs 推送是核心差异化能力？** OpenClaw 挂接 Telegram/Discord 时，推送受限于第三方平台。独占 App + APNs 实现了系统级通知（锁屏、横幅、通知中心），这是 ClawBowl 相对于"OpenClaw + 任何第三方聊天工具"方案的**不可替代差异化能力**，是 Agent 从"被动问答"到"主动服务"的关键闭环。
 
 **APNs 推送架构**：
 ```
@@ -1315,12 +1384,13 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
   → 用户点击通知 → App CronView
 ```
 
-**预期效果**：
-- 用户说"每天早上 9 点帮我查天气" → agent 自动创建 cron
-- Agent 定期自主检查记忆、整理笔记
-- 复杂任务自动拆解为子任务
-- 任何操作出错 → 可从最近快照恢复
-- **Cron 检测到异常（如 BTC 波动 >1%）→ 即使 App 未打开，用户也收到系统推送**
+**已实现效果**：
+- ✅ 用户说"每小时查询比特币价格" → agent 自动创建 cron → 前端 CronView 可查看
+- ✅ 复杂任务自动拆解为子任务（sessions_spawn）
+- ✅ Stop 按钮：用户可随时中断 AI 推理
+- ✅ 服务端分页：上滑无限回溯历史消息
+- ⏳ Cron 检测到异常（如 BTC 波动 >1%）→ APNs 系统推送（代码完成，待 Apple Developer Console 配置）
+- ⏳ 基础 Snapshot 备份（tar.zst + manifest）
 
 ### Phase 2 — 浏览器自动化
 
@@ -1401,33 +1471,45 @@ RUN npx playwright install --with-deps chromium
 
 ## 19. 当前阶段实施优先级
 
-**已完成** ✅（Phase 0）：
+> 更新：2026-02-19
+
+**已完成** ✅（Phase 0 — 核心基础）：
 1. ~~容器目录结构~~
 2. ~~多模态文件 inbox 机制~~
 3. ~~持久会话 + 记忆系统~~
 4. ~~推理过程/最终结果分离~~
 5. ~~TOOLS.md 自动维护~~
-6. ~~**前端流式性能优化**~~（✅ SSE 节流 100ms + 自定义 Equatable + 图片异步解码 + 异步加载）
-7. ~~**对话全量持久化**~~（✅ chat_logs 表 + SSE 中断 try/finally 保障）
-8. ~~**内容安全过滤**~~（✅ 0-chunk 检测 + filtered 事件 + 前端自动清洗 + 后端审计保留）
-9. ~~**错误包装 + LLM 故障转移**~~（✅ openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底）
-10. ~~**文件下载功能**~~（✅ 下载 API + workspace diff + SSE file 事件 + CDN base64 内联）
-11. ~~**对话区富内容展示**~~（✅ MarkdownUI + 图片缩略图/全屏查看 + 文件卡片 + QLPreview）
-12. ~~**修复对话区刷新空白 Bug**~~（✅ Ready Gate 机制）
-13. ~~**滚动到底部浮动按钮**~~（✅ 底部锚点 + 浮动箭头）
-14. ~~**Workspace Diff 性能优化**~~（✅ os.walk + 目录剪枝，1069ms → 1.1ms）
-15. ~~**Agent 时间感知**~~（✅ system + user 双重日期注入，已知局限见 17.5）
-16. ~~**CDN 兼容性**~~（✅ Cloudflare HTML 拦截 → SSE 内联 base64 绕过）
+6. ~~**前端流式性能优化**~~（SSE 节流 100ms + 自定义 Equatable + 图片异步解码 + 异步加载）
+7. ~~**对话全量持久化**~~（chat_logs 表 + SSE 中断 try/finally 保障）
+8. ~~**内容安全过滤**~~（0-chunk 检测 + filtered 事件 + 前端自动清洗 + 后端审计保留）
+9. ~~**错误包装 + LLM 故障转移**~~（openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底）
+10. ~~**文件下载功能**~~（下载 API + workspace diff + SSE file 事件 + CDN base64 内联）
+11. ~~**对话区富内容展示**~~（MarkdownUI + 图片缩略图/全屏查看 + 文件卡片 + QLPreview）
+12. ~~**修复对话区刷新空白 Bug**~~（Ready Gate 机制）
+13. ~~**滚动到底部浮动按钮**~~（底部锚点 + 浮动箭头）
+14. ~~**Workspace Diff 性能优化**~~（os.walk + 目录剪枝，1069ms → 1.1ms）
+15. ~~**Agent 时间感知**~~（system + user 双重日期注入，已知局限见 17.5）
+16. ~~**CDN 兼容性**~~（Cloudflare HTML 拦截 → SSE 内联 base64 绕过）
 
-**立即做**（Phase 1）：
-1. **Stop 按钮**（前端即停，后端异步清理）
+**已完成** ✅（Phase 1 — 自主能力 + UI 优化）：
+1. ~~**Stop 按钮**~~（前端即停 SSE，后端异步 cancel）
+2. ~~**Cron + Heartbeat**~~（启用 cron 工具 + HEARTBEAT.md 24h 安全心跳 + 前端 CronView）
+3. ~~**sessions_spawn**~~（子 Agent 派生，openclaw.json 启用）
+4. ~~**前端定时任务管理 UI**~~（CronView 列表 + 状态/错误/下次执行展示）
+5. ~~**proxy.py 异步 I/O**~~（httpx.AsyncClient + asyncio.to_thread，消除同步阻塞）
+6. ~~**ChatViewModel 架构重构**~~（MVVM 提取，所有业务逻辑移出 ChatView）
+7. ~~**服务端分页历史 API**~~（POST /api/v2/chat/history + 上滑加载 + 去重）
+8. ~~**UI 精简**~~（toolbar 头像 Menu 合并入口）
+9. ~~**容器空闲保护**~~（idle_reaper 跳过有 cron 的实例，防止误停）
+10. ~~**Gateway 自动配对**~~（instance_manager 启动时自动审批 pending 设备）
+11. ~~**APNs 推送**~~（代码完成：backend device_token + apns_service + alert_monitor + frontend NotificationManager）
+
+**Phase 1 待完成**：
+1. **APNs Apple Developer Console 配置**（用户操作：创建 p8 Key，上传服务器）
 2. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
-3. 启用 Cron + Heartbeat
-4. 配置 HEARTBEAT.md 自动检查项
-5. 启用 sessions_spawn（子任务）
-6. 前端"定时任务"管理 UI
+3. **ClawHub 技能市场**（安装社区技能到 workspace/skills/）
 
-**1.0 后做**（Phase 2-3）：
+**后续做**（Phase 2-3）：
 1. Docker 镜像安装 Chromium + Playwright
 2. 浏览器自动化启用
 3. 多模型智能路由（ZenMux 按任务复杂度自动切换）
@@ -1439,14 +1521,8 @@ RUN npx playwright install --with-deps chromium
 1. 订阅分级 + token 计量计费
 2. 异地加密备份（OSS/S3）
 3. 多端客户端（Android/Web）
-4. OpenClaw 模块逐步替换
-
-**不要一开始做**：
-- 分布式架构
-- MicroVM
-- 多 Agent 单实例迁移
-- 实时双向同步
-- Envelope encryption
+4. **多用户 + MicroVM 改造**（详见第 21 章）
+5. OpenClaw 模块逐步替换
 
 ---
 
@@ -1456,16 +1532,18 @@ ClawBowl 的核心不是"跑 OpenClaw"。
 
 而是：**为每个用户维护一个可版本化、可恢复、可升级、可重置的"数字灵魂实例"。**
 
-控制面管理生命周期。
-执行面提供自由。
-版本库保证安全与可控。
-OpenClaw 是当前的能力底座，但不是不可替代的依赖。
+- 控制面管理生命周期
+- 执行面提供自由
+- 版本库保证安全与可控
+- OpenClaw 是当前的能力底座，但不是不可替代的依赖
+- 宿主机是服务者，不是控制者（详见 2.3 节）
+- Docker 是过渡方案，MicroVM 是终局（详见第 21 章）
 
 **核心资产（不可替代）**：
 - iOS App（用户交互层）
-- 后端 API Gateway（控制层）
+- 后端 API Gateway + proxy.py（控制层 — 运行时无关，Docker/MicroVM 切换不影响）
 - 用户体系 + 数据库
-- Docker 编排逻辑
+- 编排逻辑（当前 Docker SDK，未来 Firecracker API）
 - 产品设计思路（固定沙盒 + 持久记忆 + 成长型助手）
 
 **可替换模块（供应商）**：
@@ -1474,3 +1552,110 @@ OpenClaw 是当前的能力底座，但不是不可替代的依赖。
 - Tavily / Kimi 搜索 / GLM Web Search（搜索 API）→ 多供应商互备
 - SiliconFlow/bge / Tencent Youtu（语义嵌入）→ 国内可达，兼容 OpenAI 格式
 - Playwright + Crawl4AI（反爬虫抓取）→ 开源自托管
+
+---
+
+## 21. 容器化局限性与 MicroVM 演进路线
+
+> 更新：2026-02-19
+
+### 21.1 Docker 容器的固有限制
+
+OpenClaw 运行在 Docker 容器中（非 privileged），这带来了一系列不可避免的能力限制：
+
+| 受限能力 | 问题 | 严重程度 | 当前解决方案 |
+|---|---|---|---|
+| **VPN/组网** | Tailscale/WireGuard 需要 TUN 设备和 NET_ADMIN 权限，容器内无法使用 | 高 | 宿主机安装 Tailscale → 共享给容器（仅单用户场景可行） |
+| **系统服务** | systemd/cron daemon 等系统级服务无法在容器内运行 | 中 | OpenClaw 自带 cron 工具替代 |
+| **内核模块** | 无法加载自定义内核模块（如 FUSE 文件系统） | 中 | 不影响当前功能 |
+| **设备访问** | 无法访问 USB、GPU 等硬件设备 | 低 | Agent 不需要直接硬件访问 |
+| **网络隔离** | 容器网络受限，无法自定义路由表 | 中 | 宿主机代理网络请求 |
+| **多租户隔离** | 共享内核，逃逸风险存在（CVE 记录） | 高（多用户） | 单用户阶段可接受，多用户必须升级 |
+
+**核心矛盾**：Agent 的能力上限取决于运行环境的能力上限。Docker 容器的 namespace 隔离本质上是"受限的进程"，而非"完整的操作系统"。随着 Agent 功能增强，这些限制会越来越成为瓶颈。
+
+### 21.2 解决方案对比
+
+| 方案 | 隔离级别 | 启动速度 | 资源消耗 | VPN/网络 | 多租户安全 | 复杂度 |
+|---|---|---|---|---|---|---|
+| **Docker（当前）** | namespace | <1s | 低 | ❌ | 中 | 低 |
+| **Docker privileged** | 弱 | <1s | 低 | ✅ | ❌ 危险 | 低 |
+| **gVisor/Kata** | 用户态内核 | 1-3s | 中 | 部分 | 高 | 中 |
+| **MicroVM (Firecracker)** | 硬件虚拟化 | <150ms | 低（约 5MB） | ✅ | 极高 | 高 |
+| **传统 VM (QEMU/KVM)** | 硬件虚拟化 | 10-30s | 高 | ✅ | 极高 | 高 |
+
+### 21.3 MicroVM 方案（Firecracker）
+
+**Firecracker**（AWS Lambda/Fargate 底层）是最适合 ClawBowl 的长期方案：
+
+- **启动速度 <150ms**：接近 Docker，远优于传统 VM
+- **内存开销约 5MB/VM**：可在单台宿主机运行数百个实例
+- **完整 Linux 内核**：每个用户获得独立内核，Tailscale/WireGuard/systemd 全部可用
+- **硬件级隔离**：KVM 虚拟化，安全性远超 Docker namespace
+- **简约设计**：仅暴露少量设备（virtio-net, virtio-block），攻击面极小
+
+**MicroVM 架构预览**：
+
+```
+┌─ iOS App ──────────────────────────────────────────┐
+│                                                     │
+└─────────────────────────────────────────────────────┘
+           ↕ HTTPS + SSE
+┌─ 宿主机 Backend ───────────────────────────────────┐
+│  proxy.py / auth / 备份 / APNs                      │
+│  ┌─ Firecracker VMM ─────────────────────────────┐ │
+│  │  ┌─ MicroVM (User A) ──────────────────────┐  │ │
+│  │  │  完整 Linux: OpenClaw + Tailscale + ...  │  │ │
+│  │  └─────────────────────────────────────────┘  │ │
+│  │  ┌─ MicroVM (User B) ──────────────────────┐  │ │
+│  │  │  完整 Linux: OpenClaw + Tailscale + ...  │  │ │
+│  │  └─────────────────────────────────────────┘  │ │
+│  └───────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────┘
+```
+
+### 21.4 演进路线
+
+**阶段 1（当前）：单用户 Docker，完整复现功能**
+
+```
+目标：在 Docker 容器中完整跑通 OpenClaw + App 全部功能
+限制：已知 Tailscale 等无法使用，通过宿主机侧方案绕行
+状态：进行中
+```
+
+**阶段 2：多用户 Docker，验证产品模型**
+
+```
+目标：支持 10-50 用户同时使用，验证订阅模型和运营可行性
+改造：Docker Compose / Swarm 编排 + 用户隔离 + 资源配额
+限制：共享内核，安全隔离不够强；网络能力仍受限
+```
+
+**阶段 3：MicroVM 迁移，生产级部署**
+
+```
+目标：每用户独立 MicroVM，完整操作系统能力 + 硬件级隔离
+改造：
+  - 制作 rootfs 镜像（OpenClaw + 基础工具链）
+  - Firecracker API 替换 Docker SDK
+  - virtio-blk 持久存储替换 bind mount
+  - virtio-net + TAP 网络替换 Docker bridge
+  - 快照 = VM snapshot（毫秒级恢复）
+收益：Tailscale/VPN 可用、systemd 可用、安全性达标、启动 <150ms
+```
+
+**迁移兼容性设计**：
+
+当前 Docker 架构的设计已为未来 MicroVM 迁移做了预留：
+
+| 当前（Docker） | 未来（MicroVM） | 迁移成本 |
+|---|---|---|
+| bind mount 持久化 | virtio-blk 块设备 | 中（换存储驱动） |
+| HTTP API 通信 | HTTP API 通信（不变） | 零 |
+| Docker SDK 生命周期 | Firecracker API 生命周期 | 中（换编排层） |
+| `instance_manager.py` | `microvm_manager.py` | 中（API 类似） |
+| proxy.py 消息路由 | proxy.py 消息路由（不变） | 零 |
+| iOS App 全部代码 | iOS App 全部代码（不变） | 零 |
+
+**核心结论**：proxy.py 消息层和 iOS App 完全不受影响，迁移成本集中在后端编排层（将 Docker SDK 调用替换为 Firecracker API 调用）。这是当前"宿主机作为服务者"架构的优势——后端代理层与容器运行时解耦。

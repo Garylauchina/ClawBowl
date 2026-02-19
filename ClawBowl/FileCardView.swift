@@ -10,6 +10,7 @@ struct FileCardView: View {
     @State private var showPreview = false
     @State private var showShare = false
     @State private var showFullScreen = false
+    @State private var downloadError: String?
 
     private enum LoadPhase {
         case idle, loading, loaded, failed
@@ -84,16 +85,10 @@ struct FileCardView: View {
                 }
             }
 
-            Text("\(file.name) · \(file.formattedSize) [\(phaseLabel)]")
+            Text("\(file.name) · \(file.formattedSize)")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
-            if !debugInfo.isEmpty {
-                Text(debugInfo)
-                    .font(.system(size: 8, design: .monospaced))
-                    .foregroundColor(.orange)
-                    .lineLimit(2)
-            }
         }
         .task(id: file.path) {
             await loadImageAsync()
@@ -178,9 +173,15 @@ struct FileCardView: View {
                 ShareSheet(items: [url])
             }
         }
+        .alert("下载失败", isPresented: .init(
+            get: { downloadError != nil },
+            set: { if !$0 { downloadError = nil } }
+        )) {
+            Button("确定", role: .cancel) {}
+        } message: {
+            Text(downloadError ?? "")
+        }
     }
-
-    @State private var debugInfo: String = ""
 
     // MARK: - Async Image Loading
 
@@ -188,38 +189,28 @@ struct FileCardView: View {
         guard loadPhase != .loaded else { return }
         loadPhase = .loading
 
-        // Priority 1: Use inline base64 data from SSE (bypasses CDN entirely)
         if let b64 = file.inlineData, !b64.isEmpty {
             if let rawData = Data(base64Encoded: b64), let image = UIImage(data: rawData) {
                 await FileDownloader.shared.cacheImage(image, forPath: file.path)
                 downloadedImage = image
                 loadPhase = .loaded
-                debugInfo = "inline:\(rawData.count)b ok"
                 return
-            } else {
-                debugInfo = "inline:decode_fail"
             }
         }
 
-        // Priority 2: Download via API (fallback)
         for attempt in 1...3 {
             loadPhase = .loading
             do {
                 let data = try await FileDownloader.shared.downloadFileData(path: file.path)
-                debugInfo = "dl:\(data.count)b"
                 if let image = UIImage(data: data) {
                     await FileDownloader.shared.cacheImage(image, forPath: file.path)
                     downloadedImage = image
                     loadPhase = .loaded
-                    debugInfo += " ok"
                     return
                 } else {
-                    let prefix = data.prefix(8).map { String(format: "%02x", $0) }.joined()
-                    debugInfo += " UIImage=nil hex:\(prefix)"
                     loadPhase = .failed
                 }
             } catch {
-                debugInfo = "err:\(error.localizedDescription.prefix(40))"
                 loadPhase = .failed
             }
 
@@ -235,7 +226,9 @@ struct FileCardView: View {
         guard loadPhase != .loading else { return }
 
         if previewURL != nil {
-            showPreview = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                showPreview = true
+            }
             return
         }
 
@@ -247,9 +240,12 @@ struct FileCardView: View {
                 )
                 previewURL = url
                 loadPhase = .idle
-                showPreview = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    showPreview = true
+                }
             } catch {
                 loadPhase = .failed
+                downloadError = error.localizedDescription
             }
         }
     }
@@ -258,7 +254,9 @@ struct FileCardView: View {
         guard loadPhase != .loading else { return }
 
         if previewURL != nil {
-            showShare = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                showShare = true
+            }
             return
         }
 
@@ -270,9 +268,12 @@ struct FileCardView: View {
                 )
                 previewURL = url
                 loadPhase = .idle
-                showShare = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    showShare = true
+                }
             } catch {
                 loadPhase = .failed
+                downloadError = error.localizedDescription
             }
         }
     }
@@ -299,12 +300,4 @@ struct FileCardView: View {
         return "\(ext) 文件"
     }
 
-    private var phaseLabel: String {
-        switch loadPhase {
-        case .idle: return "idle"
-        case .loading: return "loading"
-        case .loaded: return "ok"
-        case .failed: return "FAIL"
-        }
-    }
 }

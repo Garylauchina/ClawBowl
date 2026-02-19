@@ -46,7 +46,9 @@ struct CronView: View {
                 } else {
                     List {
                         ForEach(jobs) { job in
-                            CronJobRow(job: job)
+                            NavigationLink(destination: CronJobDetailView(job: job)) {
+                                CronJobRow(job: job)
+                            }
                         }
                         .onDelete(perform: deleteJobs)
                     }
@@ -185,6 +187,90 @@ private struct CronJobRow: View {
         case "error": return .red
         case "running": return .orange
         default: return .secondary
+        }
+    }
+}
+
+// MARK: - Cron Job Detail View
+
+private struct CronJobDetailView: View {
+    let job: CronJob
+
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .medium
+        f.locale = Locale(identifier: "zh_CN")
+        return f
+    }()
+
+    var body: some View {
+        List {
+            Section("基本信息") {
+                row("任务名称", job.displayName)
+                row("状态", job.enabled ? "已启用" : "已暂停")
+            }
+
+            Section("调度") {
+                row("Cron 表达式", job.schedule ?? "未知")
+                if let tz = job.timezone, !tz.isEmpty {
+                    row("时区", tz)
+                }
+                if let next = job.nextRunDate {
+                    row("下次执行", Self.dateFormatter.string(from: next))
+                }
+                if let last = job.lastRunDate {
+                    row("上次执行", Self.dateFormatter.string(from: last))
+                }
+            }
+
+            if let msg = job.message, !msg.isEmpty {
+                Section("任务指令") {
+                    Text(msg)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                }
+            }
+
+            if let status = job.lastStatus {
+                Section("执行状态") {
+                    row("状态", statusLabel(status))
+                    if let err = job.lastError, !err.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("错误信息")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(err)
+                                .font(.callout)
+                                .foregroundColor(.red)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("任务详情")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label)
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+                .multilineTextAlignment(.trailing)
+        }
+        .font(.callout)
+    }
+
+    private func statusLabel(_ status: String) -> String {
+        switch status {
+        case "ok", "success": return "成功"
+        case "error": return "出错"
+        case "running": return "运行中"
+        default: return status
         }
     }
 }

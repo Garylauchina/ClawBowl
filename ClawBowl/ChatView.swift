@@ -199,6 +199,7 @@ struct ChatView: View {
             if !isAtBottom {
                 Button {
                     stopMomentumTrigger &+= 1
+                    isAtBottom = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                         if let proxy = scrollProxy, let lastID = viewModel.messages.last?.id {
                             proxy.scrollTo(lastID, anchor: .bottom)
@@ -272,6 +273,7 @@ struct ChatView: View {
         guard let lastID = viewModel.messages.last?.id else { return }
         DispatchQueue.main.async {
             proxy.scrollTo(lastID, anchor: .bottom)
+            isAtBottom = true
         }
     }
 }
