@@ -54,13 +54,14 @@ struct ScrollPositionHelper: UIViewRepresentable {
 
         private func checkPosition(_ sv: UIScrollView) {
             guard sv.contentSize.height > 0, sv.frame.height > 0 else { return }
-            let inset = sv.adjustedContentInset
-            let maxOffset = sv.contentSize.height + inset.top + inset.bottom - sv.frame.height
+            let maxOffsetY = sv.contentSize.height
+                + sv.adjustedContentInset.bottom
+                - sv.frame.height
             let atBottom: Bool
-            if maxOffset <= 0 {
+            if maxOffsetY <= 0 {
                 atBottom = true
             } else {
-                let distanceFromBottom = maxOffset - sv.contentOffset.y
+                let distanceFromBottom = maxOffsetY - sv.contentOffset.y
                 atBottom = distanceFromBottom <= 80
             }
             guard atBottom != lastAtBottom else { return }
