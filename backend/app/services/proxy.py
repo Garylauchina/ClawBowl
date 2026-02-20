@@ -294,12 +294,17 @@ _CRON_KEYWORDS = {"定时", "cron", "scheduled", "调度", "计划任务", "定�
 _CRON_TOOL_HINT = (
     "\n\n[CRITICAL TOOL INSTRUCTION] "
     "You have a built-in `cron` tool for scheduled tasks. "
-    "DO NOT use exec/write/shell scripts or /etc/cron.d/. "
+    "DO NOT use exec/write/shell scripts or /etc/cron.d/ or Linux crontab. "
     "System crontab is unavailable in this container. "
-    "Use ONLY: cron({\"action\":\"add\",\"job\":{\"name\":\"...\",\"schedule\":{\"kind\":\"cron\",\"expr\":\"...\",\"tz\":\"...\"},"
-    "\"payload\":{\"kind\":\"agentTurn\",\"message\":\"...\"},\"sessionTarget\":\"isolated\",\"delivery\":{\"mode\":\"none\"}}}) "
+    "Use ONLY: cron({\"action\":\"add\",\"job\":{\"name\":\"...\","
+    "\"schedule\":{\"kind\":\"cron\",\"expr\":\"...\",\"tz\":\"Asia/Shanghai\"},"
+    "\"payload\":{\"kind\":\"agentTurn\",\"message\":\"...\"},"
+    "\"sessionTarget\":\"isolated\","
+    "\"delivery\":{\"mode\":\"none\"}}}) "
     "To delete: cron({\"action\":\"delete\",\"jobId\":\"...\"}) "
-    "To list: cron({\"action\":\"list\"})"
+    "To list: cron({\"action\":\"list\"}) "
+    "To update: cron({\"action\":\"update\",\"jobId\":\"...\",\"job\":{...}}) "
+    "For web data tasks: always use tavily_search or web_search tool, NEVER use simulated data."
 )
 
 

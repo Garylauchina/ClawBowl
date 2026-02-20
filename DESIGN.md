@@ -1,4 +1,4 @@
-# ClawBowl / Tarz 系统设计文档（V9）
+# ClawBowl / Tarz 系统设计文档（V10）
 
 > 最后更新：2026-02-20
 >
@@ -1000,15 +1000,16 @@ Secrets：
 | 层 | 技术 |
 |----|------|
 | iOS 客户端 | SwiftUI + ChatViewModel + MarkdownUI + Keychain |
-| 后端控制面 | Python FastAPI + SQLAlchemy + systemd (进程管理) |
-| 执行面 | OpenClaw Gateway (Node.js)，systemd 服务 |
+| 后端控制面 | Python FastAPI + SQLAlchemy + Docker SDK (容器管理) |
+| 执行面 | OpenClaw 2.19-2 Gateway (Node.js)，Docker 容器 |
 | 反向代理 | Nginx + Let's Encrypt |
 | LLM 提供商 | ZenMux / OpenRouter（聚合国内免费/低成本/旗舰模型） |
 | 搜索 API | Tavily（Agent 联网搜索） |
 | 数据库 | SQLite（控制面元数据 + 对话持久化） |
 | 认证 | JWT + Keychain（iOS） |
 | 推送 | APNs（HTTP/2 + JWT） |
-| 未来（多用户） | Firecracker MicroVM + KVM 基础设施 |
+| 容器运行环境 | Docker + Chromium 145 + Xvfb + Git + SSH |
+| 未来（多用户） | Firecracker MicroVM + KVM 基础设施（远期） |
 
 ---
 
@@ -1403,20 +1404,31 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
   → 用户点击通知 → App CronView
 ```
 
-### Phase 1.5 — Docker 内 OpenClaw 全功能补全
+### Phase 1.5 — Docker 内 OpenClaw 全功能补全 ✅（基本完成）
 
 > **目标**：在保持 Docker 容器架构的前提下，升级 OpenClaw 版本并补全所有可在容器内实现的功能，最大化 Agent 能力。
 
-| 任务 | 说明 | 优先级 |
+| 任务 | 说明 | 状态 |
 |---|---|---|
-| **升级 OpenClaw** | 从当前 2026.2.14 → 最新稳定版 2026.2.17+（含 Chromium 预装、cron webhook 等） | ⭐⭐⭐ |
-| **容器内安装 Chromium** | 利用 OpenClaw 2.17+ 的 Docker Chromium 支持，启用浏览器自动化 | ⭐⭐⭐ |
-| **提升容器资源上限** | 内存 1.5GB → 3GB，CPU 0.5 核 → 1.5 核，避免复杂任务 OOM | ⭐⭐⭐ |
-| **修复 cron 真实数据** | MEMORY.md 写入 Tavily 使用指引，消除模拟数据问题 | ⭐⭐ |
-| **容器内安装 SSH** | `apt install openssh-client`，使 Agent 可 SSH 到外部服务器 | ⭐⭐ |
-| **容器内安装 git** | 补充常用工具链（git、ping、ps 等） | ⭐ |
-| **web_search 配置优化** | 确认 Tavily 在容器内稳定可用，更新 openclaw.json 搜索配置 | ⭐⭐ |
-| **功能验证** | 全量功能回归测试（对话、文件、cron、heartbeat、搜索、浏览器） | ⭐⭐⭐ |
+| ~~**升级 OpenClaw**~~ | 2026.2.14 → 2026.2.19-2（含 Chromium 预装、cron webhook/stagger、CJK FTS、嵌套子代理、安全加固） | ✅ |
+| ~~**容器内安装 Chromium**~~ | Dockerfile 加入 chromium + xvfb + fonts-noto-cjk，Xvfb 自动启动 | ✅ |
+| ~~**容器内安装 SSH/Git/ps**~~ | Dockerfile 加入 openssh-client + git + procps | ✅ |
+| ~~**提升容器资源上限**~~ | 内存 1.5GB → 2GB，CPU 0.5 核 → 1.0 核（VPS 总量 3.6GB/2核，留余量给宿主机） | ✅ |
+| ~~**嵌套子代理**~~ | openclaw.json `subagents.maxSpawnDepth: 2`（2.15+ 新增） | ✅ |
+| ~~**Docker 安全兼容**~~ | 2.19 安全加固导致 `ws://` 非回环连接被阻止，通过 config `bind: loopback` + ENTRYPOINT `--bind lan` 解决 | ✅ |
+| ~~**Gateway 设备配对**~~ | 容器重建后自动重新配对（`operator.admin` 全权限） | ✅ |
+| ~~**Cron 工具提示优化**~~ | proxy.py `_CRON_TOOL_HINT` 新增 update/Tavily 指引 | ✅ |
+| ~~**功能验证**~~ | 对话 ✅ cron ✅ Git ✅ Chromium 命令行 ✅ | ✅ |
+| **浏览器自动化 CDP** | Chromium 本身正常（headless dump-dom 通过），但 OpenClaw 的 CDP 管理器启动超时 | ⚠️ 待调试 |
+| **修复 cron 真实数据** | MEMORY.md 写入 Tavily 使用指引，消除模拟数据问题 | 待实现 |
+
+**2.19 升级带来的关键新能力**：
+- CJK 全文搜索（FTS）——中文记忆搜索不再依赖向量，关键词匹配即可
+- Cron stagger（自动错峰）+ 每任务 webhook 送达
+- 嵌套子代理（sub-sub-agents, depth=2）
+- Apple Watch 伴侣 MVP + 官方 APNs 推送注册
+- iOS Share Extension（分享 URL/文本/图片到 Agent）
+- 大量安全加固（SSRF 防护、exec 注入防护、owner-only cron 工具等）
 
 **已知容器限制（当前接受，远期解决）**：
 
@@ -1427,6 +1439,7 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
 | 无 `/dev/net/tun` | 无法建立 VPN 隧道 | 接受限制 |
 | 端口绑定受限 | 仅映射 gateway 端口 | 按需在 Docker 启动时添加端口映射 |
 | GFW 外网限制 | Google/CoinGecko 等海外 API 不可达 | 与容器无关，使用 Tavily 等国内可达服务替代 |
+| 浏览器 CDP 管理器超时 | browser 工具不可用（Chromium 本身正常） | 需调试 OpenClaw 的 CDP 启动逻辑 |
 
 ### Phase 2 — 单用户功能完善
 
@@ -1643,17 +1656,24 @@ backend/templates/
 7. ~~APNs 推送代码~~（待 Apple Developer Console 配置）
 8. ~~AGENTS.md Cron 工具指南~~
 
-**当前：Phase 1 收尾 + Phase 1.5 Docker 全功能补全**：
-1. **升级 OpenClaw 至 2.17+**（Chromium 预装、cron webhook、最新修复）
-2. **容器资源上限调整**（内存 3GB、CPU 1.5 核）
-3. **APNs Apple Developer Console 配置**（用户操作：创建 p8 Key）
-4. **基础 Snapshot 备份**（tar.zst + manifest）
+**已完成** ✅（Phase 1.5 — Docker 内 OpenClaw 全功能补全）：
+1. ~~OpenClaw 升级 2.14 → 2.19-2~~（CJK FTS、嵌套子代理、cron stagger、安全加固）
+2. ~~Dockerfile 重建~~（Chromium + Xvfb + Git + SSH + procps + dbus + CJK 字体）
+3. ~~容器资源调整~~（2GB 内存 + 1.0 CPU）
+4. ~~2.19 安全兼容~~（bind loopback 绕过 ws:// 非回环阻止 + 设备全权限配对）
+5. ~~配置模板同步~~（嵌套子代理、cron 提示优化）
+
+**当前：Phase 1 收尾 + Phase 2 准备**：
+1. **APNs Apple Developer Console 配置**（用户操作：创建 p8 Key）
+2. **基础 Snapshot 备份**（tar.zst + manifest）
+3. **浏览器自动化 CDP 调试**（Chromium 正常，CDP 管理器超时待排查）
+4. **修复 cron 真实数据**（MEMORY.md 写入 Tavily 指引）
 5. **用户初始配置文件集落地**（详见第 19 章）
 6. **前端 UI 优化**（聊天框命令按钮 + 附件按钮、定时任务手动编辑/删除）
 7. **推荐指令库集成**（2000 条指令，首次启动 + 空闲时推荐）
 
 **下一步**（Phase 2 — 单用户功能完善）：
-1. 浏览器自动化（Chromium + Playwright，容器内已安装）
+1. 浏览器自动化（CDP 调试完成后启用）
 2. 多模型智能路由
 3. 极简前端改造
 4. 人格化增强
@@ -1687,16 +1707,18 @@ backend/templates/
 
 ### 21.2 Docker 容器能力限制
 
-当前 Docker 容器存在以下已知限制：
+Phase 1.5 升级后，大部分容器限制已解决：
 
-| 受限能力 | 影响 | 缓解策略 |
-|---|---|---|
-| Tailscale/VPN | Agent 无法进行设备组网 | 接受限制，远期评估去容器化 |
-| 系统 crontab | LLM 混淆时连锁失败 | proxy.py 注入 + TOOLS.md 引导 |
-| Chromium 浏览器 | 浏览器自动化不可用 | Phase 1.5 升级 OpenClaw 2.17+（含 Chromium 预装） |
-| 资源上限 | 0.5 核 + 1.5GB 不足 | Phase 1.5 调整到 1.5 核 + 3GB |
-| SSH 客户端 | Agent 无法远程操作服务器 | Phase 1.5 在镜像中安装 |
-| 端口绑定 | 仅映射 gateway 端口 | 按需添加端口映射 |
+| 受限能力 | Phase 1.5 前 | Phase 1.5 后 | 缓解策略 |
+|---|---|---|---|
+| Chromium 浏览器 | ❌ 未安装 | ✅ 已安装（Chromium 145 + Xvfb） | CDP 管理器超时待调试 |
+| SSH 客户端 | ❌ 未安装 | ✅ 已安装 | — |
+| Git | ❌ 未安装 | ✅ 已安装（2.39.5） | — |
+| 资源上限 | 0.5 核 + 1.5GB | 1.0 核 + 2GB | VPS 总量限制，暂不再提 |
+| 系统 crontab | ❌ 无 cron daemon | ✅ 使用 OpenClaw 内置 cron | proxy.py 注入 + TOOLS.md 引导 |
+| Tailscale/VPN | ❌ 无 TUN 设备 | ❌ 仍不可用 | 接受限制，远期评估去容器化 |
+| 端口绑定 | 仅 gateway 端口 | 仅 gateway 端口 | 按需添加端口映射 |
+| 2.19 ws:// 安全策略 | — | ✅ 已解决（config bind=loopback） | Dockerfile ENTRYPOINT 覆盖 |
 
 > 注：阿里云和腾讯云的常规云服务器均不支持嵌套虚拟化，裸金属服务器支持但成本较高。去容器化/MicroVM 方案推迟到多用户阶段再评估。
 
@@ -1735,23 +1757,27 @@ Tarz 的核心不是"跑 OpenClaw"。
 
 > 更新：2026-02-20
 
-### 23.1 当前容器能力评估
+### 23.1 当前容器能力评估（Phase 1.5 升级后）
 
-Phase 0-1 在 Docker 容器中运行 OpenClaw，已确认的能力边界：
+OpenClaw 已从 2.14 升级到 **2.19-2**，Docker 镜像已重建，容器能力边界更新：
 
-| 能力 | 容器内状态 | 严重度 | Phase 1.5 解决方案 |
+| 能力 | 升级前 | 升级后 | 备注 |
 |---|---|---|---|
-| **Chromium 浏览器** | 未安装 | 高 | 升级 OpenClaw 2.17+（含 Chromium 预装） |
-| **资源上限** | 0.5 核 + 1.5GB | 中 | 调整为 1.5 核 + 3GB |
-| **SSH 客户端** | 未安装 | 中 | Docker 镜像中安装 |
-| **常用工具** | 缺 git/ping/ps | 低 | Docker 镜像中安装 |
-| **Tailscale/VPN** | 无 TUN 设备 | 高 | **当前接受限制** |
-| **系统 crontab** | 无 cron daemon | 中 | **使用 OpenClaw 内置 cron** |
-| **systemd** | 不可用 | 低 | **不影响核心功能** |
-| **端口绑定** | 仅映射 gateway 端口 | 低 | **按需添加映射** |
-| **GFW 限制** | 海外 API 不可达 | 低 | **与容器无关，用 Tavily 替代** |
+| **OpenClaw 版本** | 2026.2.14 | **2026.2.19-2** | 含 CJK FTS、嵌套子代理、安全加固 |
+| **Chromium 浏览器** | ❌ 未安装 | ✅ **145.0.7632.75** | headless 正常，CDP 管理器超时待调试 |
+| **Git** | ❌ 未安装 | ✅ **2.39.5** | — |
+| **SSH** | ❌ 未安装 | ✅ openssh-client | — |
+| **进程管理** | ❌ 无 ps | ✅ procps | — |
+| **资源上限** | 0.5 核 + 1.5GB | ✅ **1.0 核 + 2GB** | VPS 总量 2核 + 3.6GB |
+| **中文字体** | ❌ | ✅ fonts-noto-cjk | 浏览器截图中文显示 |
+| **Xvfb 虚拟显示** | ❌ | ✅ 自动启动 | entrypoint.sh 管理 |
+| **cron 工具** | ✅ 可用 | ✅ **stagger + webhook** | 2.19 新增错峰和每任务 webhook |
+| **嵌套子代理** | ❌ | ✅ **depth=2** | 2.15+ 新增 |
+| **Tailscale/VPN** | ❌ 无 TUN | ❌ **仍不可用** | 唯一硬限制 |
 
-**结论**：通过升级 OpenClaw 版本和调整资源配置，9 项限制中的 **4 项可在 Phase 1.5 解决**，3 项有替代方案可绕过，仅 Tailscale/VPN 是当前无法在容器内解决的硬限制。
+**结论**：9 项原有限制中 **7 项已在 Phase 1.5 解决**，1 项有替代方案（内置 cron 替代系统 crontab），仅 **Tailscale/VPN** 是当前无法在容器内解决的硬限制。
+
+**2.19 安全兼容注意事项**：2.19 新增安全策略阻止 `ws://` 到非回环地址的连接。Docker 容器内 gateway bind=lan 会导致内部客户端使用容器 IP（172.17.x.x），触发安全拦截。解决方案：config 设置 `gateway.bind: "loopback"`（影响工具层 URL 解析），ENTRYPOINT 使用 `--bind lan`（覆盖实际监听地址为 0.0.0.0，保证 Docker 端口转发正常）。
 
 ### 23.2 远期备选方案（多用户阶段评估）
 

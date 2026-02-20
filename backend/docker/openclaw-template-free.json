@@ -50,14 +50,14 @@
       },
       "workspace": "/data/workspace",
       "maxConcurrent": 1,
-      "subagents": { "maxConcurrent": 2 }
+      "subagents": { "maxConcurrent": 2, "maxSpawnDepth": 2, "maxChildrenPerAgent": 3 }
     }
   },
   "channels": {},
   "gateway": {
     "port": 18789,
     "mode": "local",
-    "bind": "lan",
+    "bind": "loopback",
     "controlUi": { "enabled": false },
     "auth": {
       "mode": "token",

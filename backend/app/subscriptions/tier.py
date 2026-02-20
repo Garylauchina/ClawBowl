@@ -29,8 +29,8 @@ TIERS: dict[str, TierConfig] = {
         primary_model="zenmux/deepseek/deepseek-chat",
         max_tokens=4096,
         daily_message_limit=50,
-        container_memory="1536m",
-        container_cpus=0.5,
+        container_memory="2048m",
+        container_cpus=1.0,
     ),
     "pro": TierConfig(
         name="pro",

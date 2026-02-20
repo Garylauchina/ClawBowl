@@ -69,14 +69,14 @@
       "model": { "primary": "{{ PRIMARY_MODEL }}" },
       "workspace": "/data/workspace",
       "maxConcurrent": 2,
-      "subagents": { "maxConcurrent": 3 }
+      "subagents": { "maxConcurrent": 3, "maxSpawnDepth": 2, "maxChildrenPerAgent": 5 }
     }
   },
   "channels": {},
   "gateway": {
     "port": 18789,
     "mode": "local",
-    "bind": "lan",
+    "bind": "loopback",
     "controlUi": { "enabled": false },
     "auth": {
       "mode": "token",

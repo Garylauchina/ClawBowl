@@ -1,39 +1,46 @@
 FROM node:22-slim
 
+ARG OPENCLAW_INSTALL_BROWSER=1
+
 # Install system tools + Python with common data-analysis packages
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        curl \
-        python3 \
-        python3-pip \
-        python3-pandas \
-        python3-openpyxl \
-        python3-xlrd \
-        python3-pil \
-        python3-bs4 \
-        python3-matplotlib \
+        curl wget ca-certificates \
+        git openssh-client \
+        python3 python3-pip \
+        python3-pandas python3-openpyxl python3-xlrd \
+        python3-pil python3-bs4 python3-matplotlib \
+        procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Create data directory for persistent state
+# Chromium + Xvfb for browser automation (openclaw 2.17+)
+RUN if [ "$OPENCLAW_INSTALL_BROWSER" = "1" ]; then \
+        apt-get update && \
+        apt-get install -y --no-install-recommends \
+            chromium xvfb fonts-noto-cjk dbus \
+        && rm -rf /var/lib/apt/lists/* ; \
+    fi
+
 RUN mkdir -p /data/workspace /data/config
 
-# Create the symlink that mirrors host's openclaw installation.
 # At runtime, /usr/lib/node_modules/openclaw will be bind-mounted from the host.
 RUN mkdir -p /usr/lib/node_modules && \
     ln -sf /usr/lib/node_modules/openclaw/openclaw.mjs /usr/bin/openclaw
 
-# OpenClaw gateway listens on 18789 inside the container
 EXPOSE 18789
 
-# Health check – any HTTP response (including 4xx) means the gateway is alive
-HEALTHCHECK --interval=10s --timeout=5s --start-period=45s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -s -o /dev/null -X POST \
         -H "Content-Type: application/json" \
         -d '{"model":"test","messages":[]}' \
         http://127.0.0.1:18789/v1/chat/completions || exit 1
 
-# Use /data/config as the openclaw state directory
 ENV OPENCLAW_STATE_DIR=/data/config
 ENV NODE_PATH=/usr/lib/node_modules
+ENV CHROME_PATH=/usr/bin/chromium
+ENV DISPLAY=:99
 
-ENTRYPOINT ["openclaw", "gateway", "--bind", "lan", "--port", "18789"]
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
