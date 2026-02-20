@@ -166,13 +166,16 @@ struct MessageBubble: View {
 
     // MARK: - Files Section (Agent-generated files)
 
+    /// Auto-load threshold: images beyond this count show as compact cards
+    private static let imageAutoLoadLimit = 3
+
     private var filesSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("files: \(message.files.count)")
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundColor(.red)
+        let imageCount = message.files.filter(\.isImage).count
+        let useLazyMode = imageCount > Self.imageAutoLoadLimit
+
+        return VStack(alignment: .leading, spacing: 6) {
             ForEach(message.files) { file in
-                FileCardView(file: file)
+                FileCardView(file: file, lazyImage: useLazyMode)
             }
         }
     }

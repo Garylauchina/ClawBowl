@@ -49,6 +49,13 @@ actor FileDownloader {
 
     // MARK: - File Download (to temp directory for QLPreview)
 
+    /// QLPreview 不支持的纯文本扩展名 — 下载时替换为 .txt
+    private static let qlUnsupportedTextExtensions: Set<String> = [
+        "md", "markdown", "json", "csv", "yml", "yaml", "toml",
+        "log", "sh", "bash", "py", "js", "ts", "swift", "rs", "go",
+        "conf", "cfg", "ini", "env", "gitignore"
+    ]
+
     /// 下载文件到临时目录，返回本地文件 URL（供 QLPreviewController 使用）
     func downloadToTemp(path: String, filename: String) async throws -> URL {
         let data = try await downloadFileData(path: path)
@@ -57,7 +64,14 @@ actor FileDownloader {
             .appendingPathComponent("clawbowl_files", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
 
-        let localURL = tempDir.appendingPathComponent(filename)
+        var saveName = filename
+        let ext = (filename as NSString).pathExtension.lowercased()
+        if Self.qlUnsupportedTextExtensions.contains(ext) {
+            let base = (filename as NSString).deletingPathExtension
+            saveName = "\(base).\(ext).txt"
+        }
+
+        let localURL = tempDir.appendingPathComponent(saveName)
         try data.write(to: localURL)
         return localURL
     }

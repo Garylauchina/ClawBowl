@@ -1,8 +1,12 @@
 import SwiftUI
 
 /// Agent 生成的文件展示组件 — 图片内联展示缩略图，其他文件显示为卡片
+///
+/// `lazyImage = true` 时图片也显示为紧凑卡片，点击后再下载并全屏查看。
+/// 用于单条消息包含大量图片的场景，避免同时发起几十个下载请求。
 struct FileCardView: View {
     let file: FileInfo
+    var lazyImage: Bool = false
 
     @State private var downloadedImage: UIImage?
     @State private var loadPhase: LoadPhase = .idle
@@ -17,8 +21,10 @@ struct FileCardView: View {
     }
 
     var body: some View {
-        if file.isImage {
+        if file.isImage && !lazyImage {
             imageView
+        } else if file.isImage && lazyImage {
+            lazyImageCardView
         } else {
             fileCardView
         }
@@ -180,6 +186,108 @@ struct FileCardView: View {
             Button("确定", role: .cancel) {}
         } message: {
             Text(downloadError ?? "")
+        }
+    }
+
+    // MARK: - Lazy Image Card (compact, tap-to-load)
+
+    private var lazyImageCardView: some View {
+        HStack(spacing: 10) {
+            Group {
+                if loadPhase == .loaded, let img = downloadedImage {
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 44, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                } else {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color(.systemGray5))
+                        .frame(width: 44, height: 44)
+                        .overlay {
+                            if loadPhase == .loading {
+                                ProgressView().scaleEffect(0.7)
+                            } else {
+                                Image(systemName: "photo")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(file.name)
+                    .font(.callout)
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                Text("\(file.formattedSize) · 点击查看")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(.systemGray6))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color(.systemGray4), lineWidth: 0.5)
+        )
+        .onTapGesture { loadAndShowFullScreen() }
+        .contextMenu {
+            Button { loadAndShowFullScreen() } label: {
+                Label("查看图片", systemImage: "eye")
+            }
+            Button { downloadForShare() } label: {
+                Label("保存到手机", systemImage: "square.and.arrow.down")
+            }
+        }
+        .fullScreenCover(isPresented: $showFullScreen) {
+            FullScreenImageViewer(image: downloadedImage, title: file.name)
+        }
+        .sheet(isPresented: $showShare) {
+            if let url = previewURL {
+                ShareSheet(items: [url])
+            }
+        }
+        .alert("下载失败", isPresented: .init(
+            get: { downloadError != nil },
+            set: { if !$0 { downloadError = nil } }
+        )) {
+            Button("确定", role: .cancel) {}
+        } message: {
+            Text(downloadError ?? "")
+        }
+    }
+
+    private func loadAndShowFullScreen() {
+        guard loadPhase != .loading else { return }
+
+        if downloadedImage != nil {
+            showFullScreen = true
+            return
+        }
+
+        loadPhase = .loading
+        Task {
+            do {
+                let data = try await FileDownloader.shared.downloadFileData(path: file.path)
+                if let image = UIImage(data: data) {
+                    await FileDownloader.shared.cacheImage(image, forPath: file.path)
+                    downloadedImage = image
+                    loadPhase = .loaded
+                    showFullScreen = true
+                } else {
+                    loadPhase = .failed
+                    downloadError = "无法解析图片"
+                }
+            } catch {
+                loadPhase = .failed
+                downloadError = error.localizedDescription
+            }
         }
     }
 
