@@ -1,4 +1,4 @@
-# ClawBowl / Tarz 系统设计文档（V10）
+# ClawBowl / Tarz 系统设计文档（V11）
 
 > 最后更新：2026-02-20
 >
@@ -1439,7 +1439,7 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
 | 无 `/dev/net/tun` | 无法建立 VPN 隧道 | 接受限制 |
 | 端口绑定受限 | 仅映射 gateway 端口 | 按需在 Docker 启动时添加端口映射 |
 | GFW 外网限制 | Google/CoinGecko 等海外 API 不可达 | 与容器无关，使用 Tavily 等国内可达服务替代 |
-| 浏览器 CDP 管理器超时 | browser 工具不可用（Chromium 本身正常） | 需调试 OpenClaw 的 CDP 启动逻辑 |
+| ~~浏览器 CDP 管理器超时~~ | ~~browser 工具不可用（Chromium 本身正常）~~ | ✅ 已修复：`browser.executablePath` 指向系统 Chromium |
 
 ### Phase 2 — 单用户功能完善
 
@@ -1447,7 +1447,7 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
 
 | 能力 | 实现方式 | 说明 | 优先级 |
 |---|---|---|---|
-| **浏览器自动化** | Chromium + Playwright（容器内，Phase 1.5 已安装） | Agent 代替用户操作网页 | ⭐⭐⭐ |
+| **浏览器自动化** | ✅ Chromium + Playwright（容器内，Phase 1.5 已完成） | Agent 代替用户操作网页，CDP 已通 | ⭐⭐⭐ |
 | **多模型智能路由** | ZenMux/OpenRouter 管理模块 | 按任务复杂度自动路由：简单→免费，复杂→旗舰 | ⭐⭐⭐ |
 | **极简前端改造** | 进一步精简 iOS UI | 对标豆包体验：打开→聊天→关闭 | ⭐⭐ |
 | **人格化增强** | SOUL.md 深度定制 + 提示词工程 | 幽默感、个性化语气等 | ⭐⭐ |
@@ -1600,14 +1600,15 @@ backend/templates/
 | 1.6 | `.env.example` 再次更新 | ⬜ 待做 | APNs key_path / key_id / team_id 等 |
 | 1.7 | `skills/realtime-data/` 预装 | ⬜ 待做 | 实时数据技能预装到 workspace 模板 |
 
-#### Phase 1.5 收尾 — Docker 全功能补全
+#### Phase 1.5 收尾 — Docker 全功能补全 ✅
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
-| 1.5.1 | OpenClaw 升级到 2.17+ | ⬜ 待做 | 更新 Docker 镜像，获得 Chromium 预装、cron webhook 等 |
-| 1.5.2 | 容器资源上限调整 | ⬜ 待做 | 修改 instance_manager 创建参数：内存 3GB、CPU 1.5 核 |
-| 1.5.3 | 容器内工具链补全 | ⬜ 待做 | SSH、git、ping 等常用工具安装到 Docker 镜像 |
-| 1.5.4 | 全量功能回归测试 | ⬜ 待做 | 对话、文件、cron、heartbeat、搜索、浏览器自动化 |
+| 1.5.1 | OpenClaw 升级到 2.19-2 | ✅ 完成 | CJK FTS、嵌套子代理、cron stagger、安全加固 |
+| 1.5.2 | 容器资源上限调整 | ✅ 完成 | 1.0 核 + 2GB（VPS 总量 2核 + 3.6GB） |
+| 1.5.3 | 容器内工具链补全 | ✅ 完成 | Chromium + Xvfb + Git + SSH + procps + dbus + CJK 字体 |
+| 1.5.4 | 浏览器 CDP 修复 | ✅ 完成 | `browser.executablePath` + `noSandbox` + `docker --init` |
+| 1.5.5 | 全量功能回归测试 | ✅ 完成 | 对话 ✅、cron ✅、Git ✅、浏览器 ✅、搜索 ✅ |
 
 #### Phase 2 收尾 — 单用户功能完善
 
@@ -1662,19 +1663,18 @@ backend/templates/
 3. ~~容器资源调整~~（2GB 内存 + 1.0 CPU）
 4. ~~2.19 安全兼容~~（bind loopback 绕过 ws:// 非回环阻止 + 设备全权限配对）
 5. ~~配置模板同步~~（嵌套子代理、cron 提示优化）
+6. ~~浏览器自动化 CDP 修复~~（`browser.executablePath` 指向系统 Chromium + `noSandbox` + `docker --init` 修复僵尸进程）
 
 **当前：Phase 1 收尾 + Phase 2 准备**：
 1. **APNs Apple Developer Console 配置**（用户操作：创建 p8 Key）
 2. **基础 Snapshot 备份**（tar.zst + manifest）
-3. **浏览器自动化 CDP 调试**（Chromium 正常，CDP 管理器超时待排查）
-4. **修复 cron 真实数据**（MEMORY.md 写入 Tavily 指引）
-5. **用户初始配置文件集落地**（详见第 19 章）
-6. **前端 UI 优化**（聊天框命令按钮 + 附件按钮、定时任务手动编辑/删除）
-7. **推荐指令库集成**（2000 条指令，首次启动 + 空闲时推荐）
+3. **修复 cron 真实数据**（MEMORY.md 写入 Tavily 指引）
+4. **用户初始配置文件集落地**（详见第 19 章）
+5. **前端 UI 优化**（聊天框命令按钮 + 附件按钮、定时任务手动编辑/删除）
+6. **推荐指令库集成**（2000 条指令，首次启动 + 空闲时推荐）
 
 **下一步**（Phase 2 — 单用户功能完善）：
-1. 浏览器自动化（CDP 调试完成后启用）
-2. 多模型智能路由
+1. 多模型智能路由
 3. 极简前端改造
 4. 人格化增强
 5. AI 增强搜索 + 语义嵌入
@@ -1711,7 +1711,7 @@ Phase 1.5 升级后，大部分容器限制已解决：
 
 | 受限能力 | Phase 1.5 前 | Phase 1.5 后 | 缓解策略 |
 |---|---|---|---|
-| Chromium 浏览器 | ❌ 未安装 | ✅ 已安装（Chromium 145 + Xvfb） | CDP 管理器超时待调试 |
+| Chromium 浏览器 | ❌ 未安装 | ✅ Chromium 145 + Xvfb + CDP | `browser.executablePath` + `noSandbox` |
 | SSH 客户端 | ❌ 未安装 | ✅ 已安装 | — |
 | Git | ❌ 未安装 | ✅ 已安装（2.39.5） | — |
 | 资源上限 | 0.5 核 + 1.5GB | 1.0 核 + 2GB | VPS 总量限制，暂不再提 |
@@ -1719,6 +1719,7 @@ Phase 1.5 升级后，大部分容器限制已解决：
 | Tailscale/VPN | ❌ 无 TUN 设备 | ❌ 仍不可用 | 接受限制，远期评估去容器化 |
 | 端口绑定 | 仅 gateway 端口 | 仅 gateway 端口 | 按需添加端口映射 |
 | 2.19 ws:// 安全策略 | — | ✅ 已解决（config bind=loopback） | Dockerfile ENTRYPOINT 覆盖 |
+| 僵尸进程 | — | ✅ 已解决（`docker --init`） | tini 作为 PID 1 回收子进程 |
 
 > 注：阿里云和腾讯云的常规云服务器均不支持嵌套虚拟化，裸金属服务器支持但成本较高。去容器化/MicroVM 方案推迟到多用户阶段再评估。
 
@@ -1764,7 +1765,7 @@ OpenClaw 已从 2.14 升级到 **2.19-2**，Docker 镜像已重建，容器能�
 | 能力 | 升级前 | 升级后 | 备注 |
 |---|---|---|---|
 | **OpenClaw 版本** | 2026.2.14 | **2026.2.19-2** | 含 CJK FTS、嵌套子代理、安全加固 |
-| **Chromium 浏览器** | ❌ 未安装 | ✅ **145.0.7632.75** | headless 正常，CDP 管理器超时待调试 |
+| **Chromium 浏览器** | ❌ 未安装 | ✅ **145.0.7632.75** | ✅ headless + CDP 均已通 |
 | **Git** | ❌ 未安装 | ✅ **2.39.5** | — |
 | **SSH** | ❌ 未安装 | ✅ openssh-client | — |
 | **进程管理** | ❌ 无 ps | ✅ procps | — |
@@ -1775,9 +1776,14 @@ OpenClaw 已从 2.14 升级到 **2.19-2**，Docker 镜像已重建，容器能�
 | **嵌套子代理** | ❌ | ✅ **depth=2** | 2.15+ 新增 |
 | **Tailscale/VPN** | ❌ 无 TUN | ❌ **仍不可用** | 唯一硬限制 |
 
-**结论**：9 项原有限制中 **7 项已在 Phase 1.5 解决**，1 项有替代方案（内置 cron 替代系统 crontab），仅 **Tailscale/VPN** 是当前无法在容器内解决的硬限制。
+**结论**：9 项原有限制中 **8 项已在 Phase 1.5 解决**（含浏览器 CDP），1 项有替代方案（内置 cron 替代系统 crontab），仅 **Tailscale/VPN** 是当前无法在容器内解决的硬限制。
 
-**2.19 安全兼容注意事项**：2.19 新增安全策略阻止 `ws://` 到非回环地址的连接。Docker 容器内 gateway bind=lan 会导致内部客户端使用容器 IP（172.17.x.x），触发安全拦截。解决方案：config 设置 `gateway.bind: "loopback"`（影响工具层 URL 解析），ENTRYPOINT 使用 `--bind lan`（覆盖实际监听地址为 0.0.0.0，保证 Docker 端口转发正常）。
+**关键配置要点（Docker 环境下 OpenClaw 2.19+ 的必需设置）**：
+
+1. **ws:// 安全策略**：2.19 阻止 `ws://` 到非回环地址。Config 设 `gateway.bind: "loopback"`（影响工具 URL 解析），ENTRYPOINT 用 `--bind lan`（覆盖实际监听为 0.0.0.0）
+2. **浏览器 CDP**：OpenClaw 内部用 Playwright 查找浏览器，默认路径为 `~/.cache/ms-playwright/chromium-xxx/`。Docker 镜像用 apt 安装的系统 Chromium 不在此路径，须在 `openclaw.json` 中设置 `browser.executablePath: "/usr/bin/chromium"` + `browser.noSandbox: true`（root 用户必需）
+3. **僵尸进程回收**：`entrypoint.sh` 启动 Xvfb/dbus 后 `exec` 替换为 openclaw，background 子进程成为孤儿。须在 `docker run` 时加 `--init`（注入 tini 作为 PID 1）
+4. **设备配对**：容器重建后需重新配对，确保 token scopes 包含 `operator.admin` + `operator.write`（cron/browser 工具需要写权限）
 
 ### 23.2 远期备选方案（多用户阶段评估）
 
@@ -1805,3 +1811,143 @@ OpenClaw 已从 2.14 升级到 **2.19-2**，Docker 镜像已重建，容器能�
 | 数据存储 | 低（bind mount → 目标方案的存储层） |
 
 **核心结论**：proxy.py 和 iOS App 完全不受运行环境影响。迁移成本集中在 `instance_manager` 编排层，可通过 `RuntimeBackend` 抽象接口最小化。这是"Backend 作为服务者"架构的优势——代理层与运行时解耦。
+
+---
+
+## 24. OpenClaw 官方 Docker 部署参考（多用户方案知识库）
+
+> 新增：2026-02-20
+>
+> 来源：https://docs.openclaw.ai/install/docker
+>
+> 目的：为 Phase 3 多用户部署提供官方最佳实践参考，避免重复踩坑。
+
+### 24.1 官方部署方式 vs ClawBowl 当前方式
+
+| 维度 | OpenClaw 官方推荐 | ClawBowl 当前实现 | 差异说明 |
+|------|-------------------|-------------------|----------|
+| **启动方式** | `docker-setup.sh` + Docker Compose | Docker SDK 动态创建容器 | 我们是多租户平台，按需创建/销毁 |
+| **镜像** | 官方 Dockerfile（node:22-bookworm） | 自定义 `Dockerfile.openclaw`（node:22-slim） | 预装 Chromium/Xvfb/Git/SSH |
+| **运行用户** | `node` (uid 1000)，非 root | root | 官方推荐非 root，Phase 3 应迁移 |
+| **浏览器安装** | Playwright CLI (`playwright install chromium`) | apt install chromium + `browser.executablePath` | 官方用 Playwright 管理，我们用系统包 + 配置覆盖 |
+| **数据持久化** | `~/.openclaw/` bind mount | `/var/lib/clawbowl/{uid}/config` + `/workspace` | 结构类似，路径不同 |
+| **PID 1 进程管理** | 无特别说明 | `docker --init`（tini） | 官方未提及，但对后台进程必需 |
+| **Tailscale 远程访问** | 原生支持 serve/funnel 模式 | `mode: "off"`，用 Nginx 反代 | Docker 内无 Tailscale CLI |
+| **Agent Sandbox** | 独立沙盒容器（gateway 在宿主机） | Gateway 本身在容器内 | 我们是 gateway-in-Docker 模式 |
+
+### 24.2 官方推荐的安全最佳实践
+
+供 Phase 3 多用户部署参考：
+
+1. **非 root 用户**：`Dockerfile` 中 `USER node`，uid 1000
+2. **只读根文件系统**：`docker run --read-only --tmpfs /tmp --tmpfs /var/tmp`
+3. **资源限制**：`memory: 2g`，`cpus: 1`，`pids-limit: 256`
+4. **网络隔离**：沙盒默认 `network: "none"`，需显式开启
+5. **ulimits**：`nofile: 1024/2048`，`nproc: 256`
+6. **seccomp/apparmor**：可选安全配置文件
+7. **日志轮转**：JSON driver + `max-size: 10m`
+
+### 24.3 官方 Playwright 浏览器方案
+
+OpenClaw 的 `browser` 工具内部使用 **Playwright** 驱动浏览器（非原始 CDP）。官方提供三种方案：
+
+```
+方案 A：Playwright CLI 安装（官方推荐）
+  docker exec <container> node /app/node_modules/playwright-core/cli.js install chromium
+  → 浏览器安装到 ~/.cache/ms-playwright/chromium-<revision>/
+  → 路径自动匹配，无需额外配置
+
+方案 B：系统包 + 配置覆盖（ClawBowl 当前使用）
+  apt install chromium
+  + openclaw.json: { "browser": { "executablePath": "/usr/bin/chromium", "noSandbox": true } }
+  → 优点：镜像小、系统包管理器自动处理依赖
+  → 缺点：版本可能与 Playwright 期望不完全匹配
+
+方案 C：官方 Sandbox Browser 镜像
+  scripts/sandbox-browser-setup.sh → openclaw-sandbox-browser:bookworm-slim
+  → 完整 Chromium + CDP + Xvfb + noVNC
+  → 适用于 sandbox 模式（gateway 在宿主机，浏览器在沙盒）
+```
+
+**ClawBowl 选择方案 B 的原因**：
+
+- Gateway 本身运行在 Docker 内（非官方的 host-gateway + sandbox 模式）
+- 系统 Chromium 版本（145）与 Playwright 期望版本（145）一致
+- 避免额外 170MB 的 Playwright 浏览器下载
+- 通过 `browser.executablePath` 配置覆盖路径，实测 CDP 正常
+
+### 24.4 官方 Tailscale 远程访问方案
+
+OpenClaw 原生支持 Tailscale 作为 gateway 远程访问通道：
+
+| 模式 | 作用 | 安全性 | 适用场景 |
+|------|------|--------|----------|
+| `off` | 关闭（当前使用） | — | 有独立反代（Nginx/Cloudflare） |
+| `serve` | Tailnet 内 HTTPS 访问 | 高（Tailscale 身份认证） | 私有网络内多设备访问 |
+| `funnel` | 公网 HTTPS 访问 | 中（需共享密码） | 无固定 IP/域名时的公网暴露 |
+| `tailnet` bind | 直接监听 Tailnet IP | 高 | 纯 Tailnet 环境 |
+
+**ClawBowl 不使用 Tailscale 的原因**：
+- Docker 容器内无 Tailscale CLI
+- 已有 Nginx + Cloudflare 反代链路
+- Tailscale 更适合单用户自托管场景
+
+**远期价值**：如果迁移到 VPS 裸跑/MicroVM 方案，Tailscale serve 模式可作为 gateway 安全暴露方案的备选。
+
+### 24.5 多用户容器编排方案（Phase 3 参考）
+
+基于官方文档和当前实践，Phase 3 多用户部署的推荐架构：
+
+```
+┌─ Nginx/Cloudflare ─────────────────────────────────────────┐
+│  SSL 终结 + 路由                                            │
+└────────────────────────────────────────────────────────────┘
+         ↓ HTTP
+┌─ Backend (FastAPI) ────────────────────────────────────────┐
+│  用户认证 + 实例编排 + 消息代理                              │
+│  instance_manager → Docker SDK / Compose                    │
+└────────────────────────────────────────────────────────────┘
+         ↓ Docker SDK
+┌─ 容器池 ──────────────────────────────────────────────────┐
+│  User A: clawbowl-{uid_a}  ← port 19001                   │
+│  User B: clawbowl-{uid_b}  ← port 19002                   │
+│  User C: clawbowl-{uid_c}  ← port 19003                   │
+│  ...                                                        │
+│  每个容器：                                                  │
+│    - OpenClaw gateway (bind mount from host)                │
+│    - Chromium + Xvfb (apt)                                  │
+│    - browser.executablePath + noSandbox                     │
+│    - --init (tini) for PID 1                                │
+│    - bind mount: config + workspace                         │
+│    - 资源限制：按 tier 分配 CPU/内存                          │
+└────────────────────────────────────────────────────────────┘
+```
+
+**关键设计决策**：
+
+1. **端口分配**：每用户一个端口（19001 起递增），instance_manager 管理分配
+2. **镜像共享**：所有容器使用同一镜像（`clawbowl-openclaw:latest`），OpenClaw 二进制从宿主机 bind mount
+3. **升级策略**：宿主机 `npm install -g openclaw@latest` → 重启所有容器即可（零镜像重建）
+4. **安全加固清单**（Phase 3）：
+   - [ ] 切换到非 root 用户（`USER node`）
+   - [ ] 只读根文件系统 + tmpfs
+   - [ ] 每用户网络隔离（独立 Docker network）
+   - [ ] 资源配额按 tier 精细化
+   - [ ] seccomp 安全配置文件
+   - [ ] 容器日志轮转 + 集中收集
+5. **水平扩展**：单 VPS 约支持 5-10 用户（2GB 内存/用户），超出后需要多 VPS + 负载均衡
+
+### 24.6 容器化关键踩坑记录
+
+供后续维护和多用户部署参考：
+
+| 问题 | 根因 | 解决方案 | 影响版本 |
+|------|------|----------|----------|
+| `ws://` 安全拦截 | 2.19 新增策略阻止非回环 ws:// | config `bind: loopback` + ENTRYPOINT `--bind lan` | 2.19+ |
+| browser CDP 超时 | Playwright 默认查找 `~/.cache/ms-playwright/` | `browser.executablePath` + `browser.noSandbox` | 所有版本 |
+| 设备配对失败 | 容器重建后旧 token 失效 | 清除 `devices/` + 重新批准 + 全 scopes | 所有版本 |
+| Xvfb 僵尸进程 | `exec` 替换 shell 后子进程无父进程回收 | `docker run --init` 注入 tini | 所有版本 |
+| Xvfb 重启冲突 | `/tmp/.X99-lock` 残留 | entrypoint 启动前 `rm -f /tmp/.X99-lock` | 所有版本 |
+| `tools.browser` 配置错误 | 2.19 不认识此 key | 移除，Chromium 在 PATH 中自动启用 browser 工具 | 2.19+ |
+| 容器内 crontab 不存在 | Docker 无 cron daemon | 引导 LLM 使用 OpenClaw 内置 cron 工具 | 所有版本 |
+| DB locked | 多个 uvicorn 进程同时操作 SQLite | 确保单一后端进程 + WAL 模式 | 后端 |

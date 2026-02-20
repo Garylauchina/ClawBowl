@@ -21,8 +21,8 @@ struct ChatInputBar: View {
     // ── 语音输入状态 ──
     @StateObject private var speechManager = SpeechRecognitionManager()
 
-    /// 文件大小限制 10MB
-    private let maxFileSize = 10 * 1024 * 1024
+    /// 文件大小限制 50MB
+    private let maxFileSize = 50 * 1024 * 1024
 
     var body: some View {
         VStack(spacing: 0) {
@@ -135,7 +135,7 @@ struct ChatInputBar: View {
         .alert("文件过大", isPresented: $showFileTooLargeAlert) {
             Button("知道了", role: .cancel) {}
         } message: {
-            Text("\"\(rejectedFileName)\" 超过 10MB 限制，请选择较小的文件。")
+            Text("\"\(rejectedFileName)\" 超过 50MB 限制，请选择较小的文件。")
         }
         .alert("无法使用语音", isPresented: $speechManager.showPermissionAlert) {
             Button("去设置", role: .none) {

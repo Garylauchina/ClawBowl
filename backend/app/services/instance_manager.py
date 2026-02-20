@@ -207,6 +207,7 @@ class InstanceManager:
                 restart_policy={"Name": "unless-stopped"},
                 detach=True,
                 network_mode="bridge",
+                init=True,
             ),
         )
 

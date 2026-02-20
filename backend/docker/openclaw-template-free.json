@@ -81,6 +81,11 @@
       "fetch": { "enabled": true }
     }
   },
+  "browser": {
+    "executablePath": "/usr/bin/chromium",
+    "headless": true,
+    "noSandbox": true
+  },
   "commands": { "native": "auto", "nativeSkills": "auto" },
   "plugins": {},
   "skills": { "install": { "nodeManager": "npm" } }
