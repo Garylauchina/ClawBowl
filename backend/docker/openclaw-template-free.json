@@ -58,7 +58,7 @@
     "port": 18789,
     "mode": "local",
     "bind": "loopback",
-    "controlUi": { "enabled": false },
+    "controlUi": { "enabled": true },
     "auth": {
       "mode": "token",
       "token": "{{ GATEWAY_TOKEN }}"
@@ -72,7 +72,23 @@
     },
     "nodes": { "denyCommands": ["*"] }
   },
+  "hooks": {
+    "enabled": true,
+    "token": "{{ HOOKS_TOKEN }}",
+    "path": "/hooks",
+    "defaultSessionKey": "hook:ingress",
+    "allowRequestSessionKey": false
+  },
   "tools": {
+    "exec": {
+      "applyPatch": { "enabled": true, "workspaceOnly": true }
+    },
+    "loopDetection": {
+      "enabled": true,
+      "warningThreshold": 10,
+      "criticalThreshold": 20,
+      "globalCircuitBreakerThreshold": 30
+    },
     "web": {
       "search": {
         "enabled": true,
@@ -87,6 +103,10 @@
     "noSandbox": true
   },
   "commands": { "native": "auto", "nativeSkills": "auto" },
-  "plugins": {},
+  "plugins": {
+    "entries": {
+      "llm-task": { "enabled": true }
+    }
+  },
   "skills": { "install": { "nodeManager": "npm" } }
 }

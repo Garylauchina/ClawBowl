@@ -1,10 +1,18 @@
 # HEARTBEAT.md
 
-Every 24 hours, check the following:
+Every 30 minutes, check the following:
 
 ## Self-Check
 - Report current date/time to verify temporal awareness
 - Confirm web_search tool is working (search for a current topic)
+
+## Cron Job Audit
+- Review recent cron session transcripts: did any cron task use fabricated/simulated
+  data instead of calling `web_search`?
+- If so, note the job name in MEMORY.md and ensure the job description explicitly
+  requires `web_search`.
+- Reminder: cron tasks that deliver real-world information MUST call `web_search`.
+  Generating placeholder data is forbidden (see skills/realtime-data/SKILL.md).
 
 ## Memory Maintenance
 - Review MEMORY.md: if it exceeds 3000 words, summarize older sections
@@ -15,5 +23,6 @@ Every 24 hours, check the following:
 - NEVER run docker commands (stop, restart, kill, etc.)
 - NEVER modify system files outside /data/workspace
 - NEVER attempt to access the host network or install system packages
+- NEVER generate simulated or fabricated data — always use web_search for real-world facts
 - Keep heartbeat operations lightweight — avoid expensive API calls or heavy computation
 - If nothing needs attention, reply HEARTBEAT_OK

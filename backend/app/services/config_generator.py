@@ -42,11 +42,13 @@ def render_config(user: User, gateway_token: str) -> dict:
 
     raw = _load_template(tier.template)
 
-    # Replace template placeholders
+    hooks_token = secrets.token_hex(24)
+
     raw = raw.replace("{{ ZENMUX_API_KEY }}", api_key)
     raw = raw.replace("{{ MAX_TOKENS }}", str(tier.max_tokens))
     raw = raw.replace("{{ PRIMARY_MODEL }}", tier.primary_model)
     raw = raw.replace("{{ GATEWAY_TOKEN }}", gateway_token)
+    raw = raw.replace("{{ HOOKS_TOKEN }}", hooks_token)
 
     return json.loads(raw)
 

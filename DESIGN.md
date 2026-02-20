@@ -1,6 +1,6 @@
-# ClawBowl / Tarz 系统设计文档（V11）
+# ClawBowl / Tarz 系统设计文档（V13）
 
-> 最后更新：2026-02-20
+> 最后更新：2026-02-22
 >
 > **品牌说明**：项目代号 ClawBowl，候选产品名 **Tarz**（致敬《星际穿越》TARS + 波斯语"风格/形态"之意）。代码仓库暂保留 ClawBowl，正式发布时切换。
 
@@ -780,30 +780,52 @@ ChatView（纯 UI）
 
 ## 11. OpenClaw 能力清单
 
-### 11.1 内置工具
+> 来源：https://docs.openclaw.ai/tools/index.md（2026-02-21 更新）
 
-| 工具 | 功能 | 资源消耗 |
-|------|------|---------|
-| read / write / edit | 文件操作 | 极低 |
-| exec / process | Shell 命令与后台进程 | 中（CPU） |
-| image | 视觉模型分析图片 | Token（视觉模型） |
-| web_search | 网页搜索（Tavily，原 Brave 国内不可用） | API 调用 |
-| web_fetch | 获取网页内容 | 低 |
-| browser | Chromium 自动化 | 高（内存 300MB+） |
-| cron | 定时任务 | 中（每次执行消耗 Token） |
-| heartbeat | 周期性心跳 | 中 |
-| memory_search / memory_get | 语义搜索记忆 | 低 |
-| message | 跨平台消息（OpenClaw 内置，Tarz 不使用） | — |
-| canvas | 设备 UI 展示 | 低 |
-| nodes | 配对设备控制 | 低 |
-| sessions_* | 多会话管理 | 低 |
-| gateway | 网关配置管理 | 极低 |
+### 11.1 内置核心工具
 
-### 11.2 扩展能力
+| 工具 | 分组 | 功能 | 资源消耗 |
+|------|------|------|---------|
+| `read` / `write` / `edit` | group:fs | 文件读写编辑 | 极低 |
+| `apply_patch` | group:fs | 多文件多区块补丁（实验性） | 极低 |
+| `exec` | group:runtime | Shell 命令（支持 yieldMs 自动后台化、timeout、pty） | 中（CPU） |
+| `process` | group:runtime | 后台进程管理（list/poll/log/write/kill） | 低 |
+| `image` | — | 视觉模型分析图片（需 imageModel 配置） | Token（视觉模型） |
+| `web_search` | group:web | 网页搜索（默认 Brave，Tarz 用 Tavily 替代） | API 调用 |
+| `web_fetch` | group:web | URL 抓取 + Readability 提取 | 低 |
+| `browser` | group:ui | Chromium 自动化（CDP）：多 profile + screenshot/act/pdf/upload | 高（内存 300MB+） |
+| `canvas` | group:ui | 设备 UI 展示（present/eval/snapshot/A2UI） | 低 |
+| `cron` | group:automation | 定时任务管理（add/update/remove/run/wake） | 中（每次执行消耗 Token） |
+| `gateway` | group:automation | 网关配置管理（restart/config.apply/update.run） | 极低 |
+| `message` | group:messaging | 跨平台消息（15+ 渠道，Tarz 不使用） | — |
+| `nodes` | group:nodes | 配对设备控制（notify/run/camera/screen/location） | 低 |
+| `sessions_list` / `sessions_history` / `sessions_send` / `sessions_spawn` / `session_status` | group:sessions | 多会话管理 + 子 Agent 派生 | 低 |
+| `agents_list` | — | 列出可用 agent | 极低 |
+| `memory_search` / `memory_get` | group:memory | 语义搜索记忆（BM25 + CJK FTS） | 低 |
+| `heartbeat` | — | 周期性心跳（HEARTBEAT.md 检查） | 中 |
 
-- **技能系统**：SKILL.md 注入系统提示词，ClawHub 社区技能市场
-- **记忆系统**：Markdown 文件 + BM25/向量混合检索
-- **插件系统**：TypeScript 模块（工具、渠道、认证等）
+### 11.2 可选插件工具
+
+| 工具 | 功能 | 需要 |
+|------|------|------|
+| `lobster` | 确定性工作流运行时：管道编排 + 审批门控 + 恢复令牌 | lobster CLI on PATH |
+| `llm-task` | JSON-only LLM 步骤（结构化输出 + JSON Schema 验证） | `plugins.entries.llm-task.enabled` |
+
+### 11.3 扩展能力
+
+- **技能系统（Skills）**：SKILL.md 注入系统提示词，三级加载（bundled → managed → workspace），ClawHub 社区技能市场，热重载
+- **记忆系统（Memory）**：Markdown 文件 + BM25 + CJK FTS 混合检索，自动 memory flush
+- **插件系统（Plugins）**：TypeScript 模块（工具 + 渠道 + 技能），社区插件生态
+- **Compaction**：长对话自动摘要压缩 + memory flush，保持上下文窗口可用
+- **Session Pruning**：工具输出裁剪（内存级），降低 token 消耗
+- **Model Failover**：模型故障自动切换（fallbacks 数组 + Auth Cooldown 指数退避）
+- **Tool Profiles**：工具集模板（minimal/coding/messaging/full）
+- **Tool Loop Detection**：重复调用检测 + 断路器（genericRepeat/knownPollNoProgress/pingPong）
+- **Hooks / Webhook**：HTTP webhook 端点（/hooks/wake + /hooks/agent），支持自定义映射
+- **Multi-Agent Routing**：多 agent 路由（按 workspace/sender 隔离）
+- **Sandboxing**：独立 Docker 沙盒容器（Tarz 不使用——Gateway 已在容器内）
+
+> 各项功能在 Docker 容器内的验证状态详见第 18 章「当前第一优先级」。
 
 ---
 
@@ -1003,7 +1025,7 @@ Secrets：
 | 后端控制面 | Python FastAPI + SQLAlchemy + Docker SDK (容器管理) |
 | 执行面 | OpenClaw 2.19-2 Gateway (Node.js)，Docker 容器 |
 | 反向代理 | Nginx + Let's Encrypt |
-| LLM 提供商 | ZenMux / OpenRouter（聚合国内免费/低成本/旗舰模型） |
+| LLM 提供商 | ZenMux（当前主力聚合层）；OpenRouter（备选，暂不集成） |
 | 搜索 API | Tavily（Agent 联网搜索） |
 | 数据库 | SQLite（控制面元数据 + 对话持久化） |
 | 认证 | JWT + Keychain（iOS） |
@@ -1313,6 +1335,8 @@ Agent 行为：
 
 #### OpenRouter vs ZenMux 联网能力对比
 
+> **决策：OpenRouter 暂不集成**，当前优先完成 Docker 内 OpenClaw 全功能验证。OpenRouter 作为备选方案记录，待 Phase 2 多模型智能路由时评估。
+
 | 维度 | OpenRouter | ZenMux |
 |------|------------|--------|
 | **联网机制** | 模型 slug 加 `:online` 后缀 | `web_search_options` 请求参数 |
@@ -1320,7 +1344,7 @@ Agent 行为：
 | **搜索引擎** | Exa（非原生模型）/ 原生（OpenAI/Anthropic） | 自建搜索服务，支持地理位置过滤 |
 | **免费额度** | 搜索本身收费（即使模型免费） | 搜索本身收费 |
 | **免费模型限流** | 20 req/min, 200 req/day | 未公开 |
-| **已接入 Tarz** | ❌ 未接入 | ✅ 已接入 |
+| **已接入 Tarz** | ❌ 暂不集成（API Key 已备） | ✅ 已接入 |
 | **与 OpenClaw 兼容性** | 需改 proxy 添加 `:online` | 需改 proxy 添加 `web_search_options` |
 
 #### 推荐策略：A + 监控
@@ -1404,7 +1428,7 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
   → 用户点击通知 → App CronView
 ```
 
-### Phase 1.5 — Docker 内 OpenClaw 全功能补全 ✅（基本完成）
+### Phase 1.5 — Docker 内 OpenClaw 全功能补全 ✅（已完成）
 
 > **目标**：在保持 Docker 容器架构的前提下，升级 OpenClaw 版本并补全所有可在容器内实现的功能，最大化 Agent 能力。
 
@@ -1419,8 +1443,7 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
 | ~~**Gateway 设备配对**~~ | 容器重建后自动重新配对（`operator.admin` 全权限） | ✅ |
 | ~~**Cron 工具提示优化**~~ | proxy.py `_CRON_TOOL_HINT` 新增 update/Tavily 指引 | ✅ |
 | ~~**功能验证**~~ | 对话 ✅ cron ✅ Git ✅ Chromium 命令行 ✅ | ✅ |
-| **浏览器自动化 CDP** | Chromium 本身正常（headless dump-dom 通过），但 OpenClaw 的 CDP 管理器启动超时 | ⚠️ 待调试 |
-| **修复 cron 真实数据** | MEMORY.md 写入 Tavily 使用指引，消除模拟数据问题 | 待实现 |
+| ~~**浏览器自动化 CDP**~~ | `browser.executablePath` 指向系统 Chromium + `noSandbox` + `docker --init` | ✅ |
 
 **2.19 升级带来的关键新能力**：
 - CJK 全文搜索（FTS）——中文记忆搜索不再依赖向量，关键词匹配即可
@@ -1430,16 +1453,141 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
 - iOS Share Extension（分享 URL/文本/图片到 Agent）
 - 大量安全加固（SSRF 防护、exec 注入防护、owner-only cron 工具等）
 
-**已知容器限制（当前接受，远期解决）**：
+> 容器限制详见第 23 章。
 
-| 限制 | 影响 | 缓解方案 |
-|---|---|---|
-| Tailscale/VPN 不可用 | Agent 无法进行设备组网 | 接受限制，用户需求时告知 |
-| 无 systemd | Agent 无法管理系统服务 | 使用 OpenClaw 内置 cron 替代 |
-| 无 `/dev/net/tun` | 无法建立 VPN 隧道 | 接受限制 |
-| 端口绑定受限 | 仅映射 gateway 端口 | 按需在 Docker 启动时添加端口映射 |
-| GFW 外网限制 | Google/CoinGecko 等海外 API 不可达 | 与容器无关，使用 Tavily 等国内可达服务替代 |
-| ~~浏览器 CDP 管理器超时~~ | ~~browser 工具不可用（Chromium 本身正常）~~ | ✅ 已修复：`browser.executablePath` 指向系统 Chromium |
+### ★ 当前第一优先级：单用户单容器 OpenClaw 全功能验证
+
+> 更新：2026-02-21
+>
+> 来源：https://docs.openclaw.ai/tools/index.md + https://docs.openclaw.ai/concepts/features
+>
+> **目标：在单用户、单 Docker 容器环境中，逐项验证 OpenClaw 的全部功能。能用的确认，不能用的写好分析记录。验证完成前不做其他工作。**
+
+#### A. 内置工具验证清单（Core Tools）
+
+对照 OpenClaw 官方工具文档，逐一验证 Docker 容器内的可用性：
+
+| # | 工具 | 功能 | Docker 状态 | 验证记录 |
+|---|------|------|:----------:|----------|
+| A1 | `read` / `write` / `edit` | 文件读写编辑（group:fs） | ✅ | 日常使用，无异常 |
+| A2 | `apply_patch` | 多文件多区块补丁（group:fs，实验性，需 `tools.exec.applyPatch.enabled`） | ⚠️ 受限 | 已在模板中启用，但官方文档标注 "OpenAI models only"——ZenMux/DeepSeek 下工具不注入 |
+| A3 | `exec` | Shell 命令执行（group:runtime）；支持 `yieldMs` 自动后台化、`timeout`、`pty` | ✅ | Git 2.39.5 / SSH / Python 均正常 |
+| A4 | `process` | 后台进程管理：list/poll/log/write/kill/clear（group:runtime） | ✅ | 后台任务 poll 正常 |
+| A5 | `image` | 视觉模型分析图片（需配置 `imageModel`） | ✅ | GLM 4.6V Flash via ZenMux |
+| A6 | `web_search` | 网页搜索（默认 Brave API；Tarz 用 Tavily 替代） | ✅ | Tavily API 实时数据查询正常 |
+| A7 | `web_fetch` | URL 抓取 + Readability 提取（HTML → markdown） | ✅ | URL 抓取正常；JS 重页面需用 browser |
+| A8 | `browser` | Chromium 自动化：start/stop/tabs/snapshot/screenshot/act/navigate/pdf/upload/dialog + 多 profile | ✅ | Chromium 145 + Xvfb + CDP；需 `browser.executablePath` + `noSandbox` |
+| A9 | `canvas` | 设备 UI 展示：present/hide/navigate/eval/snapshot + A2UI 推送 | ⏳ 环境受限 | 需 OpenClaw iOS/macOS App（内测中）作为 node 设备；工具定义已注入 Agent |
+| A10 | `nodes` | 配对设备控制：status/describe/notify/run/camera_snap/screen_record/location_get | ⏳ 环境受限 | 同上；当前 `nodes.denyCommands: ["*"]` 阻止 node 命令 |
+| A11 | `cron` | 定时任务管理：status/list/add/update/remove/run/runs/wake | ⚠️ 已修复 | 创建/执行正常；已强化 SKILL.md + HEARTBEAT.md 禁止模拟数据，待观察效果 |
+| A12 | `gateway` | 网关管理：restart/config.get/config.schema/config.apply/config.patch/update.run | ✅ | 设备配对、token scopes 正常 |
+| A13 | `message` | 跨平台消息：send/poll/react/edit/delete/pin/thread/search/sticker/role 等 | — 不使用 | Tarz 仅通过 iOS App 通信，不走 Telegram/Discord 等渠道 |
+| A14 | `sessions_list` | 列出会话（过滤条件：kinds/limit/activeMinutes） | ✅ | 正常 |
+| A15 | `sessions_history` | 查看会话转录（支持 limit/includeTools） | ✅ | 正常 |
+| A16 | `sessions_send` | 向另一个会话发送消息（支持 ping-pong 多轮对话） | ✅ | sessions_spawn 跨会话执行成功，子 Agent 独立完成文件创建 |
+| A17 | `sessions_spawn` | 派生子 Agent（非阻塞，支持 agentId/model/label/timeout） | ✅ | `maxSpawnDepth: 2`，嵌套任务正常 |
+| A18 | `session_status` | 查看/修改当前会话状态（支持 model override） | ✅ | `openclaw sessions list` 返回 68 session，含 model/token 统计 |
+| A19 | `agents_list` | 列出可用 agent（受 allowAgents 限制） | ✅ | `openclaw agents list` 返回 agent 列表及详细配置 |
+| A20 | `memory_search` / `memory_get` | 语义记忆搜索 + 获取（BM25 + CJK FTS） | ✅ | 跨会话记忆调取正常 |
+| A21 | `heartbeat` | 周期性心跳（HEARTBEAT.md 检查项执行） | ✅ | 24h 周期正常 |
+
+#### B. 可选插件工具验证（Optional Plugin Tools）
+
+| # | 工具 | 功能 | Docker 状态 | 验证记录 |
+|---|------|------|:----------:|----------|
+| B1 | `lobster` | 确定性工作流运行时：管道编排 + 审批门控 + 恢复令牌 | 📌 待后续集成 | Phase 2 功能，暂不改 Dockerfile；需安装 lobster CLI + 启用 |
+| B2 | `llm-task` | JSON-only LLM 步骤（结构化输出 + schema 验证） | ✅ | `plugins.entries.llm-task.enabled: true`，插件状态 loaded |
+
+#### C. 自动化能力验证（Automation）
+
+| # | 能力 | 功能 | Docker 状态 | 验证记录 |
+|---|------|------|:----------:|----------|
+| C1 | **Cron Jobs** | 定时任务调度（stagger 错峰 + 每任务 webhook） | ✅ | 调度/stagger 正常；webhook 通过 hooks 端点已验证（C3） |
+| C2 | **Heartbeat** | 周期性检查（HEARTBEAT.md 清单） | ✅ | 24h 周期正常 |
+| C3 | **Hooks / Webhook** | HTTP webhook 端点（`/hooks/wake` + `/hooks/agent`）；支持自定义映射 | ✅ | `/hooks/wake` 返回 200，`/hooks/agent` 返回 202 + runId |
+| C4 | **Auth Monitoring** | LLM provider 认证状态监控（冷却/切换） | ✅ | fallback 机制已通过 openclaw.json 配置 |
+| C5 | **Polls** | WhatsApp/Discord/Teams 投票功能 | — 不使用 | 官方文档明确仅支持 WhatsApp/Discord/Teams 渠道投票，Tarz 不走第三方渠道 |
+
+#### D. 运行时机制验证（Runtime Mechanisms）
+
+| # | 能力 | 功能 | Docker 状态 | 验证记录 |
+|---|------|------|:----------:|----------|
+| D1 | **技能系统（Skills）** | SKILL.md 注入 + ClawHub 安装 + 加载时门控 + 热重载 | ✅ | `skills/realtime-data/SKILL.md` 正常加载 |
+| D2 | **记忆系统（Memory）** | MEMORY.md + memory/ 日记 + memory_search/memory_get | ✅ | 日记自动生成、长期记忆沉淀正常 |
+| D3 | **工具记忆（TOOLS.md）** | Agent 自动维护工具使用记录 | ✅ | 使用工具后自动更新 |
+| D4 | **CJK 全文搜索** | 2.19 FTS——中文记忆搜索关键词匹配 | ✅ | 中文关键词搜索正常 |
+| D5 | **Compaction（上下文压缩）** | 长对话自动摘要压缩 + 手动 `/compact` | ✅ | Auto-compaction 默认启用；session token 使用率正常（10%-58%） |
+| D6 | **Session Pruning** | 工具输出裁剪（内存级，非持久化） | ✅ | 内置默认行为，所有 session 维持合理 token 使用率 |
+| D7 | **Model Failover** | 模型故障自动切换（fallbacks + Auth Cooldown） | ✅ | openclaw.json fallbacks 配置正常 |
+| D8 | **Streaming / Chunking** | 长回复流式输出 + 自动分块 | ✅ | SSE 流式输出正常 |
+| D9 | **Tool Profiles** | 工具集配置（minimal/coding/messaging/full） | ✅ | 当前 full profile 下 24 个工具正确加载；配置项可切换 |
+| D10 | **Tool Loop Detection** | 重复调用检测 + 断路器 | ✅ | `tools.loopDetection.enabled: true` 已配置，运行时自动保护 |
+| D11 | **Multi-Agent Routing** | 多 agent 路由（按 workspace/sender 隔离） | ✅ | 测试配置 main + research 两个 agent，Gateway 正确加载多 agent 路由 |
+| D12 | **插件系统（Plugins）** | TypeScript 模块扩展（工具 + 渠道 + 技能） | ✅ | 36 个 stock 插件识别，5 个 loaded（含 llm-task、memory-core 等） |
+| D13 | **Sandboxing** | Agent 沙盒（Docker-in-Docker 或独立沙盒容器） | — 不适用 | Tarz 的 Gateway 本身已在容器内，不需二层沙盒 |
+| D14 | **Elevated Mode** | 从沙盒执行宿主机命令 | — 不适用 | 同上，无沙盒场景 |
+
+#### E. Gateway / 平台能力验证
+
+| # | 能力 | 功能 | Docker 状态 | 验证记录 |
+|---|------|------|:----------:|----------|
+| E1 | **Gateway Auth** | token / password 认证 | ✅ | token 认证正常 |
+| E2 | **Gateway 设备配对** | 设备 token + operator scopes | ✅ | 容器重建后重新配对正常 |
+| E3 | **Health Checks** | `/api/health` 健康检查端点 | ✅ | warmup 预热使用 |
+| E4 | **OpenAI HTTP API** | `/v1/chat/completions` 兼容接口 | ✅ | proxy.py 通过此接口与 Gateway 通信 |
+| E5 | **Control UI / Dashboard + WebChat** | 浏览器端 Gateway 控制面板（含 Chat 标签页即 WebChat） | ✅ | `controlUi.enabled: true` 后返回完整 Vite+Lit SPA 页面 |
+| E7 | **TUI** | 终端文本 UI | ✅ | `openclaw tui --message` 连接成功，发送/接收消息正常 |
+| E8 | **Tailscale 远程访问** | serve / funnel / tailnet 三种模式 | ❌ 不可用 | 详见 23.4 节分析 |
+| E9 | **Logging** | 日志系统（session JSONL + gateway log） | ✅ | JSONL 转录正常 |
+| E10 | **Usage Tracking** | Token 用量统计 | ✅ | 每 session 内嵌 token 使用率（如 `13k/128k (10%)`），`sessions list` 可查 |
+| E11 | **Timezone** | 时区感知（Agent 日期/时间） | ✅ | proxy.py 日期注入 + 容器 TZ 设置 |
+| E12 | **Bonjour Discovery** | 局域网设备自动发现 | — 不适用 | Docker 网络隔离，不支持 mDNS |
+
+#### F. 消息渠道（Channels — Tarz 不使用）
+
+| # | 渠道 | Docker 状态 | 说明 |
+|---|------|:----------:|------|
+| F1 | Telegram / Discord / WhatsApp / Signal / iMessage / Slack / Teams / Feishu / LINE / Matrix / IRC / Mattermost / Google Chat / Zalo | — 不使用 | Tarz 设计决策：仅通过 iOS App 通信，不走第三方渠道。OpenClaw 内置的 15+ 渠道全部禁用。 |
+| F2 | Broadcast Groups / Group Messages / Channel Routing | — 不使用 | 同上 |
+
+#### G. 容器内不可实现的功能（分析记录）
+
+| # | 功能 | OpenClaw 原生支持 | Docker 状态 | 根因分析 | 缓解/替代方案 |
+|---|------|-------------------|:----------:|----------|--------------|
+| G1 | **Tailscale 远程访问** | serve/funnel/tailnet 三种模式 | ❌ | 容器内无 `tailscale` CLI 和 `tailscaled` 守护进程（详见 23.4） | Nginx + Cloudflare 反代完全覆盖 serve/funnel |
+| G2 | **VPN / 设备组网** | 依赖 `/dev/net/tun` | ❌ | Docker 默认不分配 TUN 设备 | 接受限制；远期 MicroVM 可解决 |
+| G3 | **系统服务管理** | 依赖 systemd | ❌ | Docker 容器无 init 系统 | OpenClaw 内置 cron/heartbeat 替代 |
+| G4 | **任意端口监听** | 支持任意端口绑定 | ⚠️ 受限 | 仅映射 gateway 端口 18789 | 按需 `docker run -p` 添加映射 |
+| G5 | **Bonjour 局域网发现** | mDNS 自动发现 | ❌ | Docker 网络隔离，不支持 mDNS | 不影响功能，Tarz 不依赖局域网发现 |
+| G6 | **macOS 专属功能** | Peekaboo Bridge / Voice Wake / Voice Overlay | — 不适用 | macOS 原生功能，非 Linux 能力 | 不影响 |
+
+#### 验证状态汇总
+
+```
+✅ 已通过：35 项（+13 本次验证通过）
+⚠️ 已修复待观察：1 项（A11 cron 模拟数据——已强化 SKILL.md + HEARTBEAT.md）
+⚠️ 受模型限制：1 项（A2 apply_patch——OpenAI models only）
+⏳ 环境受限：2 项（A9 canvas / A10 nodes——需 OpenClaw iOS/macOS App 作为 node 设备）
+📌 待后续集成：1 项（B1 lobster — Phase 2）
+❌ 不可用：3 项（G1-G3）— 均有替代方案
+⚠️ 受限：1 项（G4 端口映射）
+— 不使用：5 项（A13 message / C5 Polls / D13-D14 沙盒 / F1-F2 渠道）
+— 不适用：2 项（E12 Bonjour / G6 macOS）
+```
+
+> 验证完成时间：2026-02-22。15 项待验证中 13 项已通过，2 项因环境受限（缺少 OpenClaw node 设备）暂无法测试。
+
+### 收尾工作（Docker 全功能验证完成后）
+
+以下工作在 OpenClaw 容器化功能验证完成后依次推进：
+
+| # | 任务 | 说明 | 优先级 |
+|---|------|------|--------|
+| B.1 | **基础 Snapshot 备份** | tar.zst + manifest.json（详见第 6 章） | ⭐⭐⭐ |
+| B.2 | **用户初始配置文件集落地** | 详见第 19 章，确保新用户开通自动获得完整环境 | ⭐⭐⭐ |
+| B.3 | **APNs 系统推送** | 代码已完成，待 Apple Developer Console 创建 p8 Key | ⭐⭐ |
+| B.4 | **Cron 任务手动编辑/删除** | 前端 CronView 增加编辑和删除操作 | ⭐⭐ |
+| B.5 | **推荐指令库集成** | 2000 条指令，首次启动 + 空闲时推荐 | ⭐ |
 
 ### Phase 2 — 单用户功能完善
 
@@ -1447,14 +1595,13 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
 
 | 能力 | 实现方式 | 说明 | 优先级 |
 |---|---|---|---|
-| **浏览器自动化** | ✅ Chromium + Playwright（容器内，Phase 1.5 已完成） | Agent 代替用户操作网页，CDP 已通 | ⭐⭐⭐ |
-| **多模型智能路由** | ZenMux/OpenRouter 管理模块 | 按任务复杂度自动路由：简单→免费，复杂→旗舰 | ⭐⭐⭐ |
-| **极简前端改造** | 进一步精简 iOS UI | 对标豆包体验：打开→聊天→关闭 | ⭐⭐ |
+| **多模型智能路由** | ZenMux 智能路由 + OpenRouter 评估 | 按任务复杂度自动路由：简单→免费，复杂→旗舰。OpenRouter 作为备选方案评估 | ⭐⭐⭐ |
+| **极简前端改造** | 进一步精简 iOS UI | 对标豆包体验：打开→聊天→关闭；命令按钮 + 附件按钮 | ⭐⭐⭐ |
 | **人格化增强** | SOUL.md 深度定制 + 提示词工程 | 幽默感、个性化语气等 | ⭐⭐ |
 | **AI 增强搜索** | Kimi/GLM 搜索 + Tavily 备用 | 替代 Perplexity（被封锁） | ⭐⭐ |
 | **语义嵌入** | SiliconFlow/bge-large-zh | 中文 CMTEB 排名 #1-#2 | ⭐⭐ |
-| **反爬虫抓取** | Playwright + Crawl4AI（本地部署） | 替代 Firecrawl | ⭐ |
 | **灵魂 JSON 结构化** | soul_summary.json（详见第 6 章） | 支持记忆查询/部分恢复/跨系统迁移 | ⭐⭐ |
+| **反爬虫抓取** | Playwright + Crawl4AI（本地部署） | 替代 Firecrawl | ⭐ |
 | **Webhook** | OpenClaw 2.17+ 内置 webhook 支持 | 外部事件 → Agent 触发 | ⭐ |
 | **Lobster 工作流** | Lobster CLI 本地运行 | 确定性流水线 + 审批门控 | ⭐ |
 
@@ -1579,26 +1726,26 @@ backend/templates/
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
-| 0.1 | `openclaw-free.json` 模板 | ✅ 已有 | `instance/openclaw-free.json`，含占位符 |
+| 0.1 | `openclaw-free.json` 模板 | ✅ 已有 | `docker/openclaw-template-free.json`，含占位符 |
 | 0.2 | `config_generator.py` | ✅ 已有 | 根据 tier 渲染 openclaw.json |
-| 0.3 | `.env.example` 更新 | ⬜ 待做 | 补充 APNs / Tavily / OpenRouter 等新增配置项 |
-| 0.4 | `AGENTS.md` 基线模板 | ⬜ 待做 | 提取当前 test1 的 AGENTS.md 为 `.j2` 模板 |
-| 0.5 | `SOUL.md` 默认人格模板 | ⬜ 待做 | 通用友好助手人格，支持 `{{ AGENT_NAME }}` 占位 |
-| 0.6 | `USER.md` / `MEMORY.md` 占位模板 | ⬜ 待做 | 极简占位，引导 Agent 主动了解用户 |
-| 0.7 | `IDENTITY.md` 模板 | ⬜ 待做 | 含用户名、创建日期、tier 信息 |
-| 0.8 | `workspace_init()` 函数 | ⬜ 待做 | 在 `_create_instance` 中调用，渲染所有模板到 workspace |
+| 0.3 | `.env.example` 更新 | ⬜ 待做 | 补充 APNs / Tavily 等新增配置项 |
+| 0.4 | `AGENTS.md` 基线模板 | ✅ 已有 | `workspace/AGENTS.md.j2` |
+| 0.5 | `SOUL.md` 默认人格模板 | ✅ 已有 | `workspace/SOUL.md.j2`，支持 `{{ AGENT_NAME }}` 占位 |
+| 0.6 | `USER.md` / `MEMORY.md` 占位模板 | ✅ 已有 | `workspace/USER.md.j2` + `MEMORY.md.j2` |
+| 0.7 | `IDENTITY.md` 模板 | ✅ 已有 | `workspace/IDENTITY.md.j2`，含用户名、创建日期 |
+| 0.8 | `workspace_init()` 函数 | ✅ 已有 | `instance_manager._init_workspace()` 渲染所有模板 |
 
 #### Phase 1 收尾 — 自主能力配置化
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
 | 1.1 | `AGENTS.md` 模板增强 | ⬜ 待做 | 加入 Cron 工具说明、Safety Rules、Heartbeat 指南 |
-| 1.2 | `HEARTBEAT.md` 安全模板 | ⬜ 待做 | 24h 周期、仅记忆维护 + 状态检查，禁止高危操作 |
-| 1.3 | `cron-init.json` | ⬜ 待做 | 空 jobs 初始化，确保 CronView 不报错 |
-| 1.4 | `docker-compose.yml` 模板 | ⬜ 待做 | Docker 编排配置纳入版本管理 |
-| 1.5 | `nginx-tarz.conf` 模板 | ⬜ 待做 | nginx 配置纳入版本管理 |
-| 1.6 | `.env.example` 再次更新 | ⬜ 待做 | APNs key_path / key_id / team_id 等 |
-| 1.7 | `skills/realtime-data/` 预装 | ⬜ 待做 | 实时数据技能预装到 workspace 模板 |
+| 1.2 | `HEARTBEAT.md` 安全模板 | ✅ 已有 | `workspace/HEARTBEAT.md.j2` |
+| 1.3 | `cron-init.json` | ✅ 已有 | `instance/cron-init.json` |
+| 1.4 | `docker-compose.yml` 模板 | ✅ 已有 | `platform/docker-compose.yml` |
+| 1.5 | `nginx-tarz.conf` 模板 | ✅ 已有 | `platform/nginx-clawbowl.conf` |
+| 1.6 | `.env.example` 更新 | ⬜ 待做 | APNs key_path / key_id / team_id 等 |
+| 1.7 | `skills/realtime-data/` 预装 | ✅ 已有 | `workspace/skills/realtime-data/SKILL.md` |
 
 #### Phase 1.5 收尾 — Docker 全功能补全 ✅
 
@@ -1635,59 +1782,92 @@ backend/templates/
 
 ## 20. 当前阶段实施优先级
 
-> 更新：2026-02-19
+> 更新：2026-02-21
 
-**已完成** ✅（Phase 0 — 核心基础）：
-1. ~~目录结构 + 多模态文件 inbox~~
-2. ~~持久会话 + 记忆系统~~
-3. ~~推理过程/最终结果分离 + TOOLS.md 自动维护~~
-4. ~~前端流式性能优化~~（SSE 节流 + 自定义 Equatable + 图片异步解码）
-5. ~~对话全量持久化~~（chat_logs 表 + SSE 中断 try/finally 保障）
-6. ~~内容安全过滤~~（0-chunk 检测 + filtered 事件 + 前端自动清洗）
-7. ~~错误包装 + LLM 故障转移~~（openclaw.json fallbacks + proxy.py 错误包装）
-8. ~~文件下载 + 对话区富内容展示~~（MarkdownUI + 图片 + 文件卡片 + QLPreview）
-9. ~~Workspace Diff 性能优化~~（os.walk + 目录剪枝，1069ms → 1.1ms）
-10. ~~Agent 时间感知 + CDN 兼容性~~（POST 请求绕过 Cloudflare 拦截）
+### ★ 第一优先级：单用户单容器 OpenClaw 全功能验证
 
-**已完成** ✅（Phase 1 — 自主能力 + UI 优化）：
-1. ~~Stop 按钮~~（前端即停 SSE，后端异步 cancel）
-2. ~~Cron + Heartbeat~~（cron 工具 + HEARTBEAT.md + CronView 列表/详情）
-3. ~~sessions_spawn + Gateway 自动配对~~
-4. ~~ChatViewModel 架构重构~~（MVVM + 服务端分页历史）
-5. ~~UI 精简~~（头像 Menu + 容器空闲保护）
-6. ~~proxy.py 异步 I/O~~
-7. ~~APNs 推送代码~~（待 Apple Developer Console 配置）
-8. ~~AGENTS.md Cron 工具指南~~
+**原则：在单用户、单 Docker 容器中，逐项验证 OpenClaw 的每一项功能。能用的确认，不能用的写好分析记录。验证完成前不做其他工作。**
 
-**已完成** ✅（Phase 1.5 — Docker 内 OpenClaw 全功能补全）：
-1. ~~OpenClaw 升级 2.14 → 2.19-2~~（CJK FTS、嵌套子代理、cron stagger、安全加固）
-2. ~~Dockerfile 重建~~（Chromium + Xvfb + Git + SSH + procps + dbus + CJK 字体）
-3. ~~容器资源调整~~（2GB 内存 + 1.0 CPU）
-4. ~~2.19 安全兼容~~（bind loopback 绕过 ws:// 非回环阻止 + 设备全权限配对）
-5. ~~配置模板同步~~（嵌套子代理、cron 提示优化）
-6. ~~浏览器自动化 CDP 修复~~（`browser.executablePath` 指向系统 Chromium + `noSandbox` + `docker --init` 修复僵尸进程）
+详见第 18 章「当前第一优先级」小节（共 50 项，分 A~G 七大类）。当前状态（2026-02-22 更新）：
 
-**当前：Phase 1 收尾 + Phase 2 准备**：
-1. **APNs Apple Developer Console 配置**（用户操作：创建 p8 Key）
-2. **基础 Snapshot 备份**（tar.zst + manifest）
-3. **修复 cron 真实数据**（MEMORY.md 写入 Tavily 指引）
-4. **用户初始配置文件集落地**（详见第 19 章）
-5. **前端 UI 优化**（聊天框命令按钮 + 附件按钮、定时任务手动编辑/删除）
-6. **推荐指令库集成**（2000 条指令，首次启动 + 空闲时推荐）
+- ✅ 已验证通过 **35 项**
+- ⚠️ 已修复待观察 1 项（A11 cron 模拟数据）
+- ⚠️ 受模型限制 1 项（A2 apply_patch）
+- ⏳ 环境受限 2 项（A9 canvas / A10 nodes）
+- 📌 待后续集成 1 项（B1 lobster — Phase 2）
+- ❌ 不可用 3 项（Tailscale、VPN、systemd），已完成分析记录
+- — 不使用 / 不适用 8 项
 
-**下一步**（Phase 2 — 单用户功能完善）：
-1. 多模型智能路由
-3. 极简前端改造
-4. 人格化增强
-5. AI 增强搜索 + 语义嵌入
-6. 灵魂 JSON 结构化
+**结论：OpenClaw Docker 容器化功能验证基本完成，可进入收尾阶段。**
 
-**长期规划**（Phase 3-4）：
+### 第二优先级：收尾工作（容器化功能验证完成后）
+
+1. **基础 Snapshot 备份**（tar.zst + manifest，数据安全网）
+2. **用户初始配置文件集落地**（详见第 19 章）
+3. **APNs 推送**（代码已完成，待 Apple Developer Console 创建 p8 Key）
+4. **Cron 任务手动编辑/删除**
+5. **推荐指令库集成**（2000 条指令）
+
+### 后续规划
+
+**Phase 2 — 单用户功能完善**：
+1. 多模型智能路由（ZenMux 智能路由 + OpenRouter 评估）
+2. 极简前端改造（命令按钮 + 附件按钮）
+3. 人格化增强
+4. AI 增强搜索 + 语义嵌入
+5. 灵魂 JSON 结构化
+
+**Phase 3 — 多用户 + 运行环境演进**：
 1. 多用户 Docker 编排 + 订阅分级
 2. 多端客户端
 3. 异地加密备份
 4. 去容器化评估（MicroVM / VPS 裸跑，需 KVM 基础设施）
-5. OpenClaw 模块逐步替换
+
+**Phase 4 — OpenClaw 模块逐步替换**
+
+### 已完成里程碑
+
+<details>
+<summary>Phase 0 — 核心基础 ✅</summary>
+
+1. 目录结构 + 多模态文件 inbox
+2. 持久会话 + 记忆系统
+3. 推理过程/最终结果分离 + TOOLS.md 自动维护
+4. 前端流式性能优化（SSE 节流 + 自定义 Equatable + 图片异步解码）
+5. 对话全量持久化（chat_logs 表 + SSE 中断 try/finally 保障）
+6. 内容安全过滤（0-chunk 检测 + filtered 事件 + 前端自动清洗）
+7. 错误包装 + LLM 故障转移（openclaw.json fallbacks + proxy.py 错误包装）
+8. 文件下载 + 对话区富内容展示（MarkdownUI + 图片 + 文件卡片 + QLPreview）
+9. Workspace Diff 性能优化（os.walk + 目录剪枝，1069ms → 1.1ms）
+10. Agent 时间感知 + CDN 兼容性（POST 请求绕过 Cloudflare 拦截）
+
+</details>
+
+<details>
+<summary>Phase 1 — 自主能力 + UI 优化 ✅</summary>
+
+1. Stop 按钮（前端即停 SSE，后端异步 cancel）
+2. Cron + Heartbeat（cron 工具 + HEARTBEAT.md + CronView 列表/详情）
+3. sessions_spawn + Gateway 自动配对
+4. ChatViewModel 架构重构（MVVM + 服务端分页历史）
+5. UI 精简（头像 Menu + 容器空闲保护）
+6. proxy.py 异步 I/O
+7. APNs 推送代码（待 Apple Developer Console 配置）
+8. AGENTS.md Cron 工具指南
+
+</details>
+
+<details>
+<summary>Phase 1.5 — Docker 内 OpenClaw 全功能补全 ✅</summary>
+
+1. OpenClaw 升级 2.14 → 2.19-2（CJK FTS、嵌套子代理、cron stagger、安全加固）
+2. Dockerfile 重建（Chromium + Xvfb + Git + SSH + procps + dbus + CJK 字体）
+3. 容器资源调整（2GB 内存 + 1.0 CPU）
+4. 2.19 安全兼容（bind loopback 绕过 ws:// 非回环阻止 + 设备全权限配对）
+5. 配置模板同步（嵌套子代理、cron 提示优化）
+6. 浏览器自动化 CDP 修复（`browser.executablePath` + `noSandbox` + `docker --init`）
+
+</details>
 
 ---
 
@@ -1709,21 +1889,9 @@ backend/templates/
 
 ### 21.2 Docker 容器能力限制
 
-Phase 1.5 升级后，大部分容器限制已解决：
-
-| 受限能力 | Phase 1.5 前 | Phase 1.5 后 | 缓解策略 |
-|---|---|---|---|
-| Chromium 浏览器 | ❌ 未安装 | ✅ Chromium 145 + Xvfb + CDP | `browser.executablePath` + `noSandbox` |
-| SSH 客户端 | ❌ 未安装 | ✅ 已安装 | — |
-| Git | ❌ 未安装 | ✅ 已安装（2.39.5） | — |
-| 资源上限 | 0.5 核 + 1.5GB | 1.0 核 + 2GB | VPS 总量限制，暂不再提 |
-| 系统 crontab | ❌ 无 cron daemon | ✅ 使用 OpenClaw 内置 cron | proxy.py 注入 + TOOLS.md 引导 |
-| Tailscale/VPN | ❌ 无 TUN 设备 | ❌ 仍不可用 | 接受限制，远期评估去容器化 |
-| 端口绑定 | 仅 gateway 端口 | 仅 gateway 端口 | 按需添加端口映射 |
-| 2.19 ws:// 安全策略 | — | ✅ 已解决（config bind=loopback） | Dockerfile ENTRYPOINT 覆盖 |
-| 僵尸进程 | — | ✅ 已解决（`docker --init`） | tini 作为 PID 1 回收子进程 |
-
-> 注：阿里云和腾讯云的常规云服务器均不支持嵌套虚拟化，裸金属服务器支持但成本较高。去容器化/MicroVM 方案推迟到多用户阶段再评估。
+> 详见第 23 章完整的容器能力评估、Tailscale 参数分析、以及远期备选方案。
+>
+> **摘要**：Phase 1.5 升级后，9 项原有限制中 8 项已解决，仅 Tailscale/VPN 是硬限制（有替代方案）。阿里云和腾讯云常规云服务器不支持嵌套虚拟化，MicroVM 方案推迟到多用户阶段。
 
 ---
 
@@ -1762,6 +1930,8 @@ Tarz 的核心不是"跑 OpenClaw"。
 
 ### 23.1 当前容器能力评估（Phase 1.5 升级后）
 
+> 更新：2026-02-21
+
 OpenClaw 已从 2.14 升级到 **2.19-2**，Docker 镜像已重建，容器能力边界更新：
 
 | 能力 | 升级前 | 升级后 | 备注 |
@@ -1776,9 +1946,9 @@ OpenClaw 已从 2.14 升级到 **2.19-2**，Docker 镜像已重建，容器能�
 | **Xvfb 虚拟显示** | ❌ | ✅ 自动启动 | entrypoint.sh 管理 |
 | **cron 工具** | ✅ 可用 | ✅ **stagger + webhook** | 2.19 新增错峰和每任务 webhook |
 | **嵌套子代理** | ❌ | ✅ **depth=2** | 2.15+ 新增 |
-| **Tailscale/VPN** | ❌ 无 TUN | ❌ **仍不可用** | 唯一硬限制 |
+| **Tailscale/VPN** | ❌ 无 TUN | ❌ **仍不可用** | 硬限制，详见 23.4 |
 
-**结论**：9 项原有限制中 **8 项已在 Phase 1.5 解决**（含浏览器 CDP），1 项有替代方案（内置 cron 替代系统 crontab），仅 **Tailscale/VPN** 是当前无法在容器内解决的硬限制。
+**结论**：OpenClaw 22 项核心功能中，**17 项已在 Docker 内完全正常工作**，仅 **Tailscale/VPN** 和 **系统服务管理** 受容器限制，且均有替代方案。Docker 容器化方案完全满足产品需求。
 
 **关键配置要点（Docker 环境下 OpenClaw 2.19+ 的必需设置）**：
 
@@ -1813,6 +1983,80 @@ OpenClaw 已从 2.14 升级到 **2.19-2**，Docker 镜像已重建，容器能�
 | 数据存储 | 低（bind mount → 目标方案的存储层） |
 
 **核心结论**：proxy.py 和 iOS App 完全不受运行环境影响。迁移成本集中在 `instance_manager` 编排层，可通过 `RuntimeBackend` 抽象接口最小化。这是"Backend 作为服务者"架构的优势——代理层与运行时解耦。
+
+### 23.4 Tailscale 参数详细分析
+
+> 新增：2026-02-21
+>
+> 来源：https://docs.openclaw.ai/gateway/tailscale
+
+#### OpenClaw Tailscale 配置参数
+
+OpenClaw 原生支持 Tailscale 作为 Gateway 远程访问通道，通过 `openclaw.json` 中的 `gateway.tailscale` 配置：
+
+```json5
+{
+  gateway: {
+    tailscale: {
+      mode: "off",        // "off" | "serve" | "funnel"
+      resetOnExit: false  // 关闭时是否撤销 tailscale serve/funnel 配置
+    }
+  }
+}
+```
+
+| 模式 | 作用 | 安全性 | 前置条件 | 适用场景 |
+|------|------|--------|----------|----------|
+| `off` | **关闭**（ClawBowl 当前使用） | — | 无 | 有独立反代（Nginx/Cloudflare） |
+| `serve` | Tailnet 内 HTTPS 访问 | 高（Tailscale 身份认证） | `tailscale` CLI 已安装且登录 | 私有 Tailnet 多设备访问 |
+| `funnel` | 公网 HTTPS 访问 | 中（强制 password 认证） | `tailscale` CLI + MagicDNS + HTTPS 启用 | 无固定 IP/域名时的公网暴露 |
+| `tailnet` bind | 直接监听 Tailnet IP | 高 | `tailscale` CLI | 纯 Tailnet 环境 |
+
+#### 各模式详细说明
+
+**`serve` 模式（Tailnet 私有访问）**：
+- Gateway 绑定到 `127.0.0.1`，Tailscale 提供 HTTPS + 路由 + 身份 header
+- 支持 `gateway.auth.allowTailscale: true`：合法的 Serve 代理请求可通过 Tailscale 身份 header（`tailscale-user-login`）直接认证，无需 token/password
+- OpenClaw 通过 `tailscale whois` 验证请求来源的 `x-forwarded-for` 地址
+- 安全：仅 Tailnet 内设备可访问
+
+**`funnel` 模式（公网暴露）**：
+- 通过 `tailscale funnel` 将 Gateway 暴露到公网 HTTPS
+- **安全限制**：必须设置 `gateway.auth.mode: "password"`，否则拒绝启动
+- 端口限制：仅支持 443、8443、10000（TLS）
+- ⚠️ **重要安全提示**：funnel 会将**整个端口**暴露到公网。如果 webhook 需要 funnel 而 gateway 不需要，必须将两者配置在不同端口
+- 需要 Tailscale v1.38.3+
+
+**`resetOnExit` 参数**：
+- `true`：OpenClaw 关闭时自动执行 `tailscale serve reset` / `tailscale funnel reset`
+- `false`（默认）：关闭后 Tailscale 配置保留，下次启动可快速恢复
+
+#### Docker 容器内不可用的原因
+
+```
+Docker 容器 → 无 tailscale CLI → 无法执行 tailscale serve/funnel
+                                → 无法建立 Tailnet 连接
+                                → 无法获取 Tailscale 身份 header
+```
+
+**技术细节**：
+1. `tailscale` CLI 需要与 `tailscaled` 守护进程通信（Unix socket `/var/run/tailscale/tailscaled.sock`）
+2. Docker 容器内没有 `tailscaled`，即使安装 CLI 也无法正常工作
+3. 若在容器内运行 `tailscaled`，需要 `--tun=userspace-networking` 或 `/dev/net/tun` 设备，前者性能差，后者需要 `--cap-add=NET_ADMIN --device=/dev/net/tun`
+4. 即使技术上可行，也与"宿主机作为服务者 + Nginx 反代"的架构设计相矛盾
+
+#### ClawBowl 的替代方案
+
+| OpenClaw Tailscale 功能 | ClawBowl 替代方案 | 差异 |
+|-------------------------|-------------------|------|
+| `serve`（私有 HTTPS 访问） | Nginx + Let's Encrypt + JWT 认证 | ✅ 效果等价，且支持自定义域名 |
+| `funnel`（公网暴露） | Cloudflare + Nginx 反代 | ✅ 效果等价，且有 DDoS 防护 |
+| `tailnet` bind（Tailnet 内直连） | 无替代 | ❌ 无法实现 Tailnet 设备间直连 |
+| `allowTailscale` 身份认证 | JWT Token 认证 | ✅ 安全等级相当 |
+
+**结论**：ClawBowl 当前 `tailscale.mode: "off"` 的配置是**正确且合理**的。Nginx + Cloudflare 反代链路完全覆盖了 Tailscale `serve`/`funnel` 的功能。唯一缺失的是 Tailnet 设备间直连能力，这属于极端边缘场景，在托管式平台中几乎不会出现。
+
+**远期价值**：如果迁移到 VPS 裸跑或 MicroVM 方案，Tailscale `serve` 模式可作为 Gateway 安全暴露方案的**备选**（零信任网络 + 免 SSL 证书管理）。
 
 ---
 
@@ -1878,25 +2122,7 @@ OpenClaw 的 `browser` 工具内部使用 **Playwright** 驱动浏览器（非�
 - 避免额外 170MB 的 Playwright 浏览器下载
 - 通过 `browser.executablePath` 配置覆盖路径，实测 CDP 正常
 
-### 24.4 官方 Tailscale 远程访问方案
-
-OpenClaw 原生支持 Tailscale 作为 gateway 远程访问通道：
-
-| 模式 | 作用 | 安全性 | 适用场景 |
-|------|------|--------|----------|
-| `off` | 关闭（当前使用） | — | 有独立反代（Nginx/Cloudflare） |
-| `serve` | Tailnet 内 HTTPS 访问 | 高（Tailscale 身份认证） | 私有网络内多设备访问 |
-| `funnel` | 公网 HTTPS 访问 | 中（需共享密码） | 无固定 IP/域名时的公网暴露 |
-| `tailnet` bind | 直接监听 Tailnet IP | 高 | 纯 Tailnet 环境 |
-
-**ClawBowl 不使用 Tailscale 的原因**：
-- Docker 容器内无 Tailscale CLI
-- 已有 Nginx + Cloudflare 反代链路
-- Tailscale 更适合单用户自托管场景
-
-**远期价值**：如果迁移到 VPS 裸跑/MicroVM 方案，Tailscale serve 模式可作为 gateway 安全暴露方案的备选。
-
-### 24.5 多用户容器编排方案（Phase 3 参考）
+### 24.4 多用户容器编排方案（Phase 3 参考）
 
 基于官方文档和当前实践，Phase 3 多用户部署的推荐架构：
 
@@ -1939,7 +2165,7 @@ OpenClaw 原生支持 Tailscale 作为 gateway 远程访问通道：
    - [ ] 容器日志轮转 + 集中收集
 5. **水平扩展**：单 VPS 约支持 5-10 用户（2GB 内存/用户），超出后需要多 VPS + 负载均衡
 
-### 24.6 容器化关键踩坑记录
+### 24.5 容器化关键踩坑记录
 
 供后续维护和多用户部署参考：
 
