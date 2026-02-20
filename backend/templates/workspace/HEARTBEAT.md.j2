@@ -1,0 +1,19 @@
+# HEARTBEAT.md
+
+Every 24 hours, check the following:
+
+## Self-Check
+- Report current date/time to verify temporal awareness
+- Confirm web_search tool is working (search for a current topic)
+
+## Memory Maintenance
+- Review MEMORY.md: if it exceeds 3000 words, summarize older sections
+- Check memory/ directory: ensure daily logs are being written
+- Review recent memory/YYYY-MM-DD.md files and distill key learnings into MEMORY.md
+
+## Important Rules
+- NEVER run docker commands (stop, restart, kill, etc.)
+- NEVER modify system files outside /data/workspace
+- NEVER attempt to access the host network or install system packages
+- Keep heartbeat operations lightweight — avoid expensive API calls or heavy computation
+- If nothing needs attention, reply HEARTBEAT_OK

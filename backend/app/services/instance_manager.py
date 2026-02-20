@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import docker
 import docker.errors
-from sqlalchemy import select, update
+from jinja2 import Environment, FileSystemLoader
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -21,6 +24,8 @@ from app.subscriptions.tier import get_tier
 
 logger = logging.getLogger("clawbowl.instance_manager")
 
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent / "templates"
+
 # Module-level Docker client (sync, used from async via run_in_executor)
 _docker: docker.DockerClient | None = None
 
@@ -30,6 +35,71 @@ def _get_docker() -> docker.DockerClient:
     if _docker is None:
         _docker = docker.from_env()
     return _docker
+
+
+def _init_workspace(user: User, workspace_dir: Path, config_dir: Path) -> None:
+    """Render workspace templates into a new user's workspace directory.
+
+    Only writes files that don't already exist — safe to call on existing users.
+    Also creates cron/jobs.json in the config directory if missing.
+    """
+    ws_template_dir = _TEMPLATES_DIR / "workspace"
+    if not ws_template_dir.is_dir():
+        logger.warning("Workspace templates dir not found: %s", ws_template_dir)
+        return
+
+    now = datetime.now(timezone.utc)
+    context = {
+        "USER_NAME": user.username,
+        "USER_LANGUAGE": "中文",
+        "USER_TIMEZONE": "Asia/Shanghai",
+        "AGENT_NAME": "Claw",
+        "CREATION_DATE": now.strftime("%Y-%m-%d"),
+    }
+
+    env = Environment(
+        loader=FileSystemLoader(str(ws_template_dir)),
+        keep_trailing_newline=True,
+    )
+
+    for tpl_path in ws_template_dir.rglob("*"):
+        if tpl_path.is_dir():
+            continue
+
+        rel = tpl_path.relative_to(ws_template_dir)
+
+        if tpl_path.suffix == ".j2":
+            dest = workspace_dir / str(rel).removesuffix(".j2")
+        else:
+            dest = workspace_dir / rel
+
+        if dest.exists():
+            continue
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        if tpl_path.suffix == ".j2":
+            template = env.get_template(str(rel))
+            dest.write_text(template.render(**context), encoding="utf-8")
+            logger.debug("Rendered workspace template: %s", dest.name)
+        else:
+            shutil.copy2(tpl_path, dest)
+            logger.debug("Copied workspace file: %s", dest.name)
+
+    cron_dir = config_dir / "cron"
+    cron_dir.mkdir(parents=True, exist_ok=True)
+    jobs_file = cron_dir / "jobs.json"
+    if not jobs_file.exists():
+        cron_init_src = _TEMPLATES_DIR / "instance" / "cron-init.json"
+        if cron_init_src.exists():
+            shutil.copy2(cron_init_src, jobs_file)
+        else:
+            jobs_file.write_text('{"version": 1, "jobs": []}\n', encoding="utf-8")
+
+    memory_dir = workspace_dir / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Initialized workspace for user %s", user.username)
 
 
 class InstanceManager:
@@ -123,7 +193,6 @@ class InstanceManager:
 
     def _has_active_cron_jobs(self, instance: OpenClawInstance) -> bool:
         """Check if the instance has any enabled cron jobs."""
-        import json as _json
         jobs_path = Path(instance.config_path) / "cron" / "jobs.json"
         if not jobs_path.exists():
             return False
@@ -167,6 +236,9 @@ class InstanceManager:
 
         # Write per-user openclaw.json
         write_config(user, gateway_token, config_dir)
+
+        # Populate workspace with templates (agent "birth pack")
+        _init_workspace(user, workspace_dir, config_dir)
 
         # Create DB record first
         instance = OpenClawInstance(
@@ -299,8 +371,6 @@ class InstanceManager:
         The OpenClaw gateway-client generates a pairing request on first start.
         Without approval, tools like cron/gateway won't function.
         """
-        import json as _json
-
         devices_dir = config_dir / "devices"
         pending_path = devices_dir / "pending.json"
         paired_path = devices_dir / "paired.json"
