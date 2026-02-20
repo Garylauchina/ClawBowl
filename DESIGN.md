@@ -1,44 +1,48 @@
-# ClawBowl 系统设计文档（V7）
+# ClawBowl / Tarz 系统设计文档（V9）
 
 > 最后更新：2026-02-20
+>
+> **品牌说明**：项目代号 ClawBowl，候选产品名 **Tarz**（致敬《星际穿越》TARS + 波斯语"风格/形态"之意）。代码仓库暂保留 ClawBowl，正式发布时切换。
 
 ---
 
 ## 1. 设计目标
 
-ClawBowl 是一个面向普通用户的托管式 OpenClaw 运行平台。
+Tarz 是一个面向普通用户的托管式 AI Agent 平台，基于 OpenClaw 开源框架。
+
+**产品理念**：极简前端 + 智能后端。用户看到的只是一个聊天框，所有复杂性（记忆治理、任务调度、沙盒执行、模型路由）由后端完成。
 
 核心目标：
 
-1. 每个用户拥有一个独立、常驻的 OpenClaw 实例
+1. 每个用户拥有一个独立、常驻的 OpenClaw 实例（"数字分身"）
 2. 支持多模态输入（文本 / 文件 / 图片 / 音频）
 3. 支持技能与长期记忆
 4. 支持订阅分级（Free / Pro / Premium）
 5. 支持：
    - 定期备份
    - 崩溃恢复
-   - 容器升级
+   - 运行环境升级
    - 回滚
    - 重置到出厂状态
-6. 用户不需要理解部署、Docker、模型 API 等技术细节
+6. 用户不需要理解部署、服务器、模型 API 等技术细节
 
 ---
 
 ## 2. 总体架构
 
-系统分为两层：
+系统分为两层，当前运行在 Docker 容器中。
 
 ### 2.1 控制面（Control Plane）
 
 **负责**：
 - 用户注册与订阅
-- Runtime 生命周期管理
+- OpenClaw 实例生命周期管理
 - 版本库（Snapshot）管理
 - 备份与恢复
-- 容器调度与升级
+- 实例升级与回滚
 - API 路由
 - 文件中转（接收 → 存入 inbox → 发引用消息）
-- 会话历史 API（从容器读取，支持分页）
+- 会话历史 API（从数据库分页查询）
 
 **不负责**：
 - 文档解析 / OCR / 文件理解
@@ -47,49 +51,50 @@ ClawBowl 是一个面向普通用户的托管式 OpenClaw 运行平台。
 
 ### 2.2 执行面（Execution Plane）
 
-每个用户一个独立容器，容器内运行：
-- OpenClaw runtime（Gateway 模式）
+OpenClaw 以 Gateway 模式运行，提供：
 - cron / heartbeat 自动化
 - 用户技能
 - 用户记忆
 - 工具链（文件、Shell、浏览器、网页搜索等）
 - 多模态文件处理（image 工具、media understanding）
 
-容器对用户而言是"数字灵魂"的载体。
+**当前运行方式**：Docker 容器（一个用户对应一个容器），通过 bind mount 共享数据目录。
+
+> 已知容器存在部分能力限制（详见第 23 章），当前策略是在 Docker 内最大化 OpenClaw 功能覆盖，远期再评估去容器化或 MicroVM。
 
 ### 2.3 架构哲学：宿主机作为服务者
 
 > 更新：2026-02-19
 
-**核心原则：宿主机是服务者，不是控制者。容器内的 Agent 实例如何演化，宿主机不干预。**
+**核心原则：宿主机是服务者，不是控制者。Agent 实例如何演化，宿主机不干预。**
 
 ```
 ┌─ iOS App ──────────────────────────────────────────────┐
 │  ChatView / ChatViewModel / NotificationManager        │
 └────────────────────────────────────────────────────────┘
            ↕ HTTPS + SSE
-┌─ 宿主机 Backend（服务者）──────────────────────────────┐
+┌─ Backend（服务者）────────────────────────────────────┐
 │  职责：                                                 │
 │  ├─ 用户管理、认证                                      │
-│  ├─ 容器生命周期维护（启动/停止/升级/恢复）               │
+│  ├─ OpenClaw 容器生命周期维护（启动/停止/升级/恢复）     │
 │  ├─ 对话全量持久化（chat_logs 表）                       │
 │  ├─ 数据/记忆备份（Snapshot）                           │
 │  ├─ 消息路由（proxy.py → OpenClaw API）                 │
 │  ├─ APNs 推送转发（alert_monitor → Apple）              │
-│  └─ 文件中转（workspace bind mount）                    │
+│  └─ 文件读取（直接访问 workspace 目录）                  │
 │  不做：                                                 │
-│  ├─ 不修改容器内部状态                                   │
+│  ├─ 不修改 OpenClaw 内部状态                             │
 │  ├─ 不注入 Agent 行为规则（AGENTS.md 由 Agent 自行维护） │
 │  └─ 不干预 Agent 的技能/记忆演化                         │
 └────────────────────────────────────────────────────────┘
            ↕ HTTP (OpenAI 兼容 API)
-┌─ OpenClaw Container（数字灵魂）───────────────────────┐
+┌─ OpenClaw Gateway（数字灵魂，Docker 容器）──────────┐
 │  完全自治：Agent 自主管理 AGENTS.md / MEMORY.md / skills │
-│  宿主机零侵入：仅通过 API 通信 + bind mount 持久化       │
+│  Backend 零侵入：仅通过 HTTP API 通信                    │
 └────────────────────────────────────────────────────────┘
 ```
 
-**零侵入原则**：宿主机对容器的唯一交互方式是 HTTP API 和 bind mount。不直接修改容器内文件（如 AGENTS.md），不在容器内安装额外软件。这确保 OpenClaw 可平滑升级，Agent 的演化完全自主。
+**零侵入原则**：Backend 与 OpenClaw 容器的唯一交互方式是 HTTP API。不直接修改 OpenClaw 管理的文件（如 AGENTS.md），不干预 Agent 运行时状态。Backend 通过 bind mount 目录读取 workspace 文件和 cron 配置，但不写入。这确保 OpenClaw 可平滑升级，Agent 的演化完全自主。
 
 ---
 
@@ -122,18 +127,21 @@ cache/                           # 临时缓存
 
 ---
 
-## 4. 容器内目录结构
+## 4. OpenClaw 数据目录
 
-遵循 OpenClaw 默认布局（`$HOME/.openclaw/`），确保所有内置工具完全兼容：
+OpenClaw 在 Docker 容器内运行，数据通过 bind mount 持久化到宿主机。
+
+**宿主机侧**（bind mount 源）：
 
 ```
-/root/.openclaw/                  # OPENCLAW_STATE_DIR
-  openclaw.json                   # 配置文件
-  agents/main/sessions/           # 会话记录
-  agents/main/agent/              # Agent 状态
-  canvas/                         # Canvas 资源
-  cron/                           # 定时任务状态
-  workspace/                      # Agent 工作空间
+/var/lib/clawbowl/{user_id}/            # 用户实例根目录
+  config/                               # bind mount → 容器 /data/config
+    openclaw.json                       # 配置文件
+    agents/main/sessions/               # 会话记录
+    agents/main/agent/                  # Agent 状态
+    canvas/                             # Canvas 资源
+    cron/                               # 定时任务状态
+  workspace/                            # bind mount → 容器 /data/workspace
     AGENTS.md
     SOUL.md
     USER.md
@@ -141,37 +149,40 @@ cache/                           # 临时缓存
     MEMORY.md
     memory/
     skills/
-    media/inbound/                # 多模态文件 inbox
+    media/inbound/                      # 多模态文件 inbox
+  snapshots/                            # 备份快照（Backend 管理）
+  locks/                                # 操作锁
 ```
 
-### 宿主机挂载映射
+**容器内侧**：
 
 ```
-宿主机                                              容器内
-/var/lib/clawbowl/{user_id}/config/            →   /data/config/        （openclaw.json, cron/jobs.json）
-/var/lib/clawbowl/{user_id}/workspace/         →   /data/workspace/     （Agent 工作区）
-/var/lib/clawbowl/{user_id}/sessions/          →   /data/sessions/      （会话记录）
-/var/lib/clawbowl/{user_id}/snapshots/         →   宿主机独占            （备份快照，不挂入容器）
+/data/
+  config/           ← bind mount 自宿主机 config/
+  workspace/        ← bind mount 自宿主机 workspace/
 ```
 
-> 注：设计文档第 5 节使用 `{rid}`（runtime_id）作为路径标识，当前单用户阶段实际使用 `{user_id}`。多用户阶段将统一为 `{rid}`。
+Backend（proxy.py、file_router 等）通过宿主机侧 bind mount 目录直接读取 workspace 文件和 cron 配置，无需进入容器。
 
 ---
 
-## 5. 权威存储结构（宿主机）
+## 5. 权威存储结构
 
 ```
-/var/lib/clawbowl/runtimes/<rid>/
-  runtime.json                    # Runtime 元数据
+/var/lib/clawbowl/{user_id}/
+  config/                            # bind mount → /data/config (OpenClaw 运行时数据)
+    openclaw.json                    # 配置
+    agents/                          # Agent 状态和会话
+    cron/                            # Cron 任务
+  workspace/                         # bind mount → /data/workspace
   snapshots/
     000001/
-      soul.tar.zst               # 灵魂压缩包
-      manifest.json              # 版本清单
+      soul.tar.zst                   # 灵魂压缩包
+      manifest.json                  # 版本清单
     000002/
       ...
-  soul/                           # 当前工作副本（挂载到容器）
-  workspace/                      # 工作空间（挂载到容器）
-  locks/                          # 操作锁
+  locks/                             # 操作锁
+  runtime.json                       # 实例元数据
 ```
 
 ---
@@ -181,10 +192,10 @@ cache/                           # 临时缓存
 ### 6.1 三层备份架构
 
 ```
-┌─ 第一层：实时镜像（bind mount）─────────────────────────────┐
-│  宿主机直接持有所有文件，容器崩溃不丢数据                    │
-│  /var/lib/clawbowl/runtimes/{rid}/soul/                      │
-│  ✅ Phase 0 已实现（当前架构天然具备）                        │
+┌─ 第一层：Docker bind mount 实时持有────────────────────────┐
+│  OpenClaw 数据通过 bind mount 持久化到宿主机                 │
+│  /var/lib/clawbowl/{user_id}/config/ + workspace/            │
+│  ✅ Phase 0 已实现（容器停止/重建不丢数据）                   │
 └──────────────────────────────────────────────────────────────┘
          ↓ 定期快照
 ┌─ 第二层：本地 Snapshot（tar.zst + JSON 摘要）───────────────┐
@@ -205,7 +216,7 @@ cache/                           # 临时缓存
 每个 Snapshot 包含：
 
 ```
-/var/lib/clawbowl/runtimes/{rid}/snapshots/{snap_id}/
+/var/lib/clawbowl/{user_id}/snapshots/{snap_id}/
   files.tar.zst          # 灵魂目录完整压缩包
   manifest.json          # 版本清单（见下）
   soul_summary.json      # 结构化摘要（Phase 3 加入）
@@ -273,19 +284,19 @@ cache/                           # 临时缓存
 | Pro | 每 5 分钟 | 30 个 | 约 2.5 小时回滚窗口 |
 | Premium | 每 1 分钟 | 无限 | 精细粒度回滚 |
 
-**备份流程**（无需进入容器，直接操作宿主机挂载目录）：
+**备份流程**（操作宿主机 bind mount 目录）：
 
-1. 从 `/var/lib/clawbowl/runtimes/{rid}/soul/` 打包 → `files.tar.zst`
+1. 从 `/var/lib/clawbowl/{user_id}/config/` + `workspace/` 打包 → `files.tar.zst`
 2. 计算 SHA-256 → 写入 `manifest.json`
 3. （Phase 3+）解析 MD 文件 → 生成 `soul_summary.json`
 4. 更新 `runtime.json` 中的最新快照指针
 5. 清理超出保留数量的旧快照
 
 **特殊触发时机**：
-- 容器升级前（`source: "upgrade"`）
+- OpenClaw 容器升级前（`source: "upgrade"`）
 - 启用 cron/heartbeat 前（`source: "pre_cron"`）
 - 用户手动触发（`source: "manual"`）
-- 容器崩溃检测到后立即备份当前状态（`source: "crash"`）
+- 进程崩溃检测到后立即备份当前状态（`source: "crash"`）
 
 ---
 
@@ -294,17 +305,18 @@ cache/                           # 临时缓存
 ### 7.1 新用户注册
 
 1. 选择模板（free/pro）
-2. 生成 runtime_id
-3. 创建 Snapshot#000001（从模板）
-4. 启动容器（带资源限制）
-5. 注入 Snapshot
-6. 运行健康检查
+2. 生成 user_id（多用户阶段生成 runtime_id）
+3. 创建用户数据目录 `/var/lib/clawbowl/{user_id}/`
+4. 从模板渲染初始配置文件（参见第 19 章 User Provisioning Bundle）
+5. 创建 Snapshot#000001（初始状态）
+6. 创建并启动 Docker 容器（bind mount config/ + workspace/）
+7. 运行健康检查
 
-### 7.2 容器资源管理
+### 7.2 资源管理
 
-> **设计原则**：容器规模是免费用户的成本控制手段（小容器 = 低成本），而非用户体验的差异点。用户感知到的差异是"灵魂容量"（记忆空间大小），而非技术参数。详见第 12 章。
+> **设计原则**：单用户阶段 OpenClaw 直接使用 VPS 全部资源，无需资源限制。多用户阶段通过 MicroVM 实现资源隔离。用户感知到的差异是"灵魂容量"（记忆空间大小），而非技术参数。详见第 12 章。
 
-**容器资源按订阅级别：**
+**资源按订阅级别（多用户阶段生效）：**
 
 | 资源 | Free | Pro | Premium |
 |---|---|---|---|
@@ -313,40 +325,29 @@ cache/                           # 临时缓存
 | workspace 存储 | 200 MB | 500 MB | 2 GB |
 | 记忆文件上限 | 10 MB | 50 MB | 无限 |
 
-**系统自动伸缩（用户无感）：**
+**单用户阶段**：OpenClaw 进程直接使用 VPS 资源，可通过 systemd 的 `MemoryMax`、`CPUQuota` 做软限制。
 
-| 场景 | 系统行为 |
-|---|---|
-| 容器空闲 | 降低 CPU 权重，资源让给活跃容器 |
-| 复杂任务执行中（浏览器/编程） | 临时提升 CPU/内存，完成后回收 |
-| 记忆/存储接近上限 | **Agent 自动优化**：压缩归档旧记忆、清理临时文件（非限制用户） |
-| 用户升级订阅 | `docker update` 即时扩容，无需重建容器 |
+**多用户阶段（MicroVM）**：每个 MicroVM 分配独立 vCPU + 内存配额，硬件级隔离。
 
-**技术实现**：
-- CPU/内存热扩容：`docker update --cpus=N --memory=Xg`，即时生效
-- 存储：bind mount 天然不受容器限制，控制面定期 `du -s` 监控
-- 多用户场景（Phase 4+）：`--cpu-shares` 权重分配，保证公平性
+### 7.3 崩溃恢复
 
-### 7.3 容器崩溃恢复
+1. 检测到 OpenClaw 进程崩溃（systemd `on-failure` 事件）
+2. 立即对当前 state 目录做崩溃快照（`source: "crash"`）
+3. systemd 自动重启服务（`Restart=on-failure`）
+4. 健康检查
+5. 若重启失败，选择最近**成功**的 Snapshot 恢复
+6. 失败则回退到上一个 Snapshot
 
-1. 停止崩溃容器
-2. 立即对当前 soul 目录做崩溃快照（`source: "crash"`）
-3. 选择最近**成功**的 Snapshot 恢复
-4. 启动新容器
-5. 注入 Snapshot
-6. 健康检查
-7. 失败则回退到上一个 Snapshot
-
-### 7.4 容器升级（蓝绿部署）
+### 7.4 升级
 
 1. 强制 Checkpoint（`source: "upgrade"`）
-2. 拉取新镜像
-3. 使用最近 Snapshot 启动新容器（green）
-4. 健康检查通过 → 切流量
-5. 停止旧容器
-6. 失败则回滚到 Checkpoint
+2. 停止 OpenClaw 服务（`systemctl stop tarz-openclaw`）
+3. 更新 OpenClaw（`npm update -g openclaw`）
+4. 启动服务（`systemctl start tarz-openclaw`）
+5. 健康检查通过 → 完成
+6. 失败则从 Checkpoint 恢复 + 回滚 npm 版本
 
-### 7.5 容器重置
+### 7.5 重置
 
 **Soft Reset**：
 - 恢复到 Snapshot#000001
@@ -355,7 +356,8 @@ cache/                           # 临时缓存
 **Factory Reset**：
 - 删除所有 Snapshots
 - 重建模板 Snapshot
-- 重启容器
+- 重新渲染初始配置
+- 重启 OpenClaw 服务
 
 ---
 
@@ -370,7 +372,7 @@ cache/                           # 临时缓存
 1. iOS 发送含图片/文件的请求
 2. Orchestrator 提取文件 → 存入 `{workspace}/media/inbound/{filename}`
 3. 向 OpenClaw 发送引用消息：`[用户发送了文件: media/inbound/{filename}]`
-4. OpenClaw 容器内自行识别文件类型、调用 image/read/exec 等工具处理
+4. OpenClaw 自行识别文件类型、调用 image/read/exec 等工具处理
 
 ### 8.3 Fallback
 
@@ -378,7 +380,7 @@ cache/                           # 临时缓存
 
 ### 8.4 文件下载（Agent 生成文件 → 用户手机）
 
-Agent 在容器内生成的文件（PDF、PPT、文档、图片等）需要交付给用户。由于容器 workspace 通过 bind mount 已在宿主机上，只需补全"后端下载 API + 前端文件卡片"两个环节。
+Agent 生成的文件（PDF、PPT、文档、图片等）需要交付给用户。由于 workspace 目录在 VPS 本地文件系统上，Backend 可直接读取，只需补全"后端下载 API + 前端文件卡片"两个环节。
 
 **完整链路：**
 
@@ -395,7 +397,7 @@ iOS 解析 file 事件 → 渲染文件卡片
 **后端实现：**
 
 1. **下载 API**：`GET /api/v2/files/download?path={relative_path}`
-   - 将 path 映射到 `/var/lib/clawbowl/runtimes/{rid}/workspace/{path}`
+   - 将 path 映射到 `/var/lib/clawbowl/{user_id}/workspace/{path}`
    - JWT 鉴权 + 路径校验（防目录穿越）
    - 返回文件流 + Content-Type + Content-Disposition
 
@@ -434,9 +436,9 @@ iOS 解析 file 事件 → 渲染文件卡片
 
 **核心理念：上下文管理是 AI 的工作，不是用户的工作。**
 
-ClawBowl 的前端永远只有一个对话窗口，不展示多个对话线程。这与 ChatGPT、Claude 等产品的设计理念根本不同：
+Tarz 的前端永远只有一个对话窗口，不展示多个对话线程。这与 ChatGPT、Claude 等产品的设计理念根本不同：
 
-| 传统 AI 产品 | ClawBowl |
+| 传统 AI 产品 | Tarz |
 |---|---|
 | 多个对话线程，用户手动切换 | **单一对话流**，AI 自动管理上下文 |
 | 用户需要决定"这个问题属于哪个对话" | **用户只需说话**，AI 自动关联历史 |
@@ -533,7 +535,7 @@ AI 推理和回复过程可能耗时较长（尤其涉及工具调用链时）�
 | LLM 返回空/异常 | "AI 回复异常，正在重试..." | 切换备用 LLM 重试 |
 | 后端 500 | "服务暂时繁忙，请稍后再试" | 记录日志，不自动重试 |
 | JWT 过期 / 401 | "登录已过期" + 自动跳转登录 | 前端清除 token，重新认证 |
-| 容器未启动 | "正在启动你的 AI 助手..." | 自动启动容器 + warmup |
+| 服务未启动 | "正在启动你的 AI 助手..." | 自动启动 OpenClaw 服务 + warmup |
 
 #### LLM 故障转移（自动重试）
 
@@ -603,7 +605,7 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 | **流式渲染卡顿** | 每个 SSE chunk 触发一次 `@State` 变更 + O(n) 查找 + Attachment.data 参与 Equatable diff | **100ms 节流** + **缓存索引** + **自定义 Equatable**（排除二进制数据），详见 9.8 | ✅ |
 | **启动时键盘弹出卡顿** | 首次 build 后的初始化开销（MessageStore 同步加载、视图渲染） | MessageStore 改为异步加载 + ChatViewModel 惰性初始化 | ✅ |
 | **CDN 拦截 Cron API** | Cloudflare 对 GET `/api/v2/cron/jobs` 返回 HTML 屏蔽页 | 改为 POST 请求绕过 CDN | ✅ |
-| **容器被误停** | idle_reaper 30min 超时停止容器，Docker unless-stopped 策略失效 | idle_reaper 检查 cron jobs，有活跃任务不停止 | ✅ |
+| **服务被误停** | idle_reaper 超时停止 OpenClaw 服务 | idle_reaper 检查 cron jobs，有活跃任务不停止 | ✅ |
 
 ### 9.7 滚动到底部浮动按钮
 
@@ -791,7 +793,7 @@ ChatView（纯 UI）
 | cron | 定时任务 | 中（每次执行消耗 Token） |
 | heartbeat | 周期性心跳 | 中 |
 | memory_search / memory_get | 语义搜索记忆 | 低 |
-| message | 跨平台消息（OpenClaw 内置，ClawBowl 不使用） | — |
+| message | 跨平台消息（OpenClaw 内置，Tarz 不使用） | — |
 | canvas | 设备 UI 展示 | 低 |
 | nodes | 配对设备控制 | 低 |
 | sessions_* | 多会话管理 | 低 |
@@ -813,7 +815,7 @@ ChatView（纯 UI）
 >
 > - **永不限制使用**：免费用户也能无限对话，不设日消息上限
 > - **永不降智**：所有用户使用同等级的 LLM，AI 的"脑子"不分三六九等
-> - **成本控制靠容器规模**：免费用户的容器小一些（记忆、存储），成本天然可控
+> - **成本控制靠资源配额**：免费用户的资源配额小一些（记忆、存储），成本天然可控
 > - **接近上限时优化而非限制**：Agent 自动压缩/归档旧记忆，用户无感
 >
 > 这恰好与"数字灵魂"隐喻吻合：
@@ -825,12 +827,12 @@ ChatView（纯 UI）
 
 | 成本项 | 月费用/用户 | 说明 |
 |---|---|---|
-| 容器（CPU + 内存） | ≈ ¥5-15 | 极低，Free 用户给小容器即可控制 |
+| 实例（CPU + 内存） | ≈ ¥5-15 | 极低，Free 用户给小配额即可控制 |
 | 存储 | ≈ ¥1-3 | 可忽略 |
 | LLM token（中端模型） | ≈ ¥10-50 | DeepSeek V3.2 / GLM-5，所有用户共享 |
 | 搜索 API | ≈ ¥5-10 | Tavily / Kimi 搜索 |
 
-> **关键**：国内中端模型（DeepSeek V3.2 输入 $0.28/M，GLM-5 输入 $0.11/M）成本极低。即使免费用户每天对话 100 次，月 token 成本也仅 ¥5-15。这个成本可以通过广告、增值服务或小容器资源节省来覆盖。
+> **关键**：国内中端模型（DeepSeek V3.2 输入 $0.28/M，GLM-5 输入 $0.11/M）成本极低。即使免费用户每天对话 100 次，月 token 成本也仅 ¥5-15。这个成本可以通过广告、增值服务或资源配额节省来覆盖。
 
 ### 12.3 订阅分级
 
@@ -849,11 +851,11 @@ ChatView（纯 UI）
 
 #### Free —— 年轻的灵魂
 
-零成本，通过限制容器规模控制成本。AI 智力不打折。
+零成本，通过限制资源配额控制成本。AI 智力不打折。
 
 | 类别 | 规格 | 说明 |
 |------|------|------|
-| **容器** | CPU 0.5 核 / 内存 512MB / 存储 200MB | 小容器，成本极低 |
+| **实例资源** | CPU 0.5 核 / 内存 512MB / 存储 200MB | 低配额，成本极低 |
 | **记忆容量** | 记忆文件上限 10MB（约 3-6 个月日记） | 超限时 Agent 自动归档压缩旧记忆 |
 | **workspace** | 100MB | 超限时 Agent 自动清理临时文件 |
 | 自动化 | 无 | cron/heartbeat 禁用 |
@@ -878,7 +880,7 @@ ChatView（纯 UI）
 
 | 类别 | 规格 | 说明 |
 |------|------|------|
-| **容器** | CPU 1 核 / 内存 1.5GB / 存储 1GB | — |
+| **实例资源** | CPU 1 核 / 内存 1.5GB / 存储 1GB | — |
 | **记忆容量** | 记忆文件上限 50MB（约 2 年日记） | 更丰富的长期记忆 |
 | **workspace** | 500MB | — |
 | 自动化 | cron + heartbeat | 最多 5 个定时任务 |
@@ -893,7 +895,7 @@ ChatView（纯 UI）
 
 | 类别 | 规格 | 说明 |
 |------|------|------|
-| **容器** | CPU 1 核 / 内存 2GB / 存储 2GB | 系统自动伸缩 |
+| **实例资源** | CPU 1 核 / 内存 2GB / 存储 2GB | 系统自动伸缩 |
 | **记忆容量** | **无限** | 完整的生命记忆 |
 | **workspace** | 2GB | — |
 | **旗舰模型** | Kimi K2.5 / DeepSeek Reasoner 等 | **包含在订阅内** |
@@ -907,12 +909,12 @@ ChatView（纯 UI）
 
 用户**永远不会被限制使用**，系统通过优化来控制成本：
 
-| 场景 | 传统做法（❌） | ClawBowl 做法（✅） |
+| 场景 | 传统做法（❌） | Tarz 做法（✅） |
 |---|---|---|
 | 免费用户对话多 | 限制 50 条/天 | **不限制**，中端模型 token 成本极低 |
 | 记忆空间满 | 停止记录新记忆 | **Agent 自动归档压缩**旧记忆为摘要 |
 | 存储空间满 | 禁止写入 | **Agent 自动清理**临时文件 + 通知用户 |
-| 用户长期不活跃 | 删除账户 | **容器休眠**（停止但不删除），唤醒后秒级恢复 |
+| 用户长期不活跃 | 删除账户 | **实例休眠**（停止但不删除），唤醒后秒级恢复 |
 | Pro 用户想用旗舰模型 | 升级到 Premium | **按量加购**，不强制升级整个套餐 |
 
 > **核心理念**：永远不要让用户感觉"被限制了"。优化是 AI 的工作，不是用户的负担。
@@ -921,11 +923,16 @@ ChatView（纯 UI）
 
 ## 13. 安全边界
 
-容器必须：
-- 非 privileged
-- 无宿主机敏感目录挂载
-- 资源上限按订阅级别（Free: 0.5 核/512MB → Premium: 1 核/2GB），防止单容器耗尽宿主机
-- 可限制出网（Free 限制外网访问 / Pro+ 完全开放）
+**当前阶段（Docker 容器）**：
+- OpenClaw 在容器内以 root 运行（容器内 root ≠ 宿主机 root）
+- Docker namespace 隔离（进程、网络、文件系统）
+- 资源配额由 Docker cgroup 限制（内存、CPU）
+- OpenClaw 端口仅映射到 `127.0.0.1`（Backend 代理外部访问）
+- 数据目录通过 bind mount 持久化到 `/var/lib/clawbowl/`
+
+**多用户阶段（远期）**：
+- 每用户独立容器，Docker Compose 编排
+- 按需评估更强隔离方案（gVisor / MicroVM）
 
 Secrets：
 - 每 Runtime 一个 DEK（数据加密密钥）
@@ -936,19 +943,23 @@ Secrets：
 
 ## 14. 升级策略
 
-- 不使用 `latest` tag
-- 明确 `desired_version`
-- 蓝绿升级
-- 自动回滚
+- 明确 `desired_version`，不盲目追最新
 - 升级前强制 Checkpoint
+- 升级后健康检查，失败自动回滚
+
+**升级路径（Docker 阶段）**：
+1. `docker stop {container_name}`
+2. 更新宿主机 OpenClaw 模块（bind mount 为只读）或拉取新镜像
+3. `docker start {container_name}` 或重建容器
+4. 健康检查，失败则回退到前一版本 + 从 Checkpoint 恢复
 
 ### 14.1 OpenClaw 内核隔离性评估
 
-> 更新：2026-02-18。Phase 0 完成后的架构隔离确认。
+> 更新：2026-02-19。Phase 0 完成后的架构隔离确认。
 
-**核心结论：所有 Phase 0 改动均未触碰 OpenClaw 内核代码，OpenClaw 可平滑升级。**
+**核心结论：所有改动均未触碰 OpenClaw 内核代码，OpenClaw 可平滑升级。**
 
-ClawBowl 的三层架构天然保证了隔离性：
+三层架构天然保证了隔离性：
 
 ```
 ┌─ iOS App（SwiftUI）──────────────────────────────────┐
@@ -963,11 +974,10 @@ ClawBowl 的三层架构天然保证了隔离性：
 │  auth.py: JWT 认证                                     │  ← 我们的代码
 └────────────────────────────────────────────────────────┘
           ↕ HTTP (OpenAI 兼容 API)
-┌─ OpenClaw Container（Docker）────────────────────────┐
-│  openclaw gateway --bind lan --port 18789             │  ← 未修改
-│  /usr/lib/node_modules/openclaw (bind mount)          │  ← 未修改
-│  /data/config/openclaw.json                           │  ← 仅配置
-│  /data/workspace/                                     │  ← Agent 工作区
+┌─ OpenClaw Gateway（Docker 容器）───────────────────┐
+│  openclaw gateway --bind 0.0.0.0 --port 18789        │  ← 容器内监听
+│  /data/config/openclaw.json                           │  ← bind mount 配置
+│  /data/workspace/                                     │  ← bind mount 工作区
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -975,14 +985,13 @@ ClawBowl 的三层架构天然保证了隔离性：
 
 | 类别 | 文件 | 是否触碰 OpenClaw 内核 | 说明 |
 |------|------|----------------------|------|
-| iOS 前端 | `ClawBowl/*.swift`（15 个文件） | ❌ 完全独立 | SwiftUI 纯前端，通过 HTTPS 与后端通信 |
-| 后端代理 | `backend/app/**/*.py`（15 个文件） | ❌ 完全独立 | FastAPI 服务，通过 HTTP 转发到 OpenClaw |
+| iOS 前端 | `ClawBowl/*.swift`（15+ 个文件） | ❌ 完全独立 | SwiftUI 前端，通过 HTTPS 与后端通信 |
+| 后端代理 | `backend/app/**/*.py`（15+ 个文件） | ❌ 完全独立 | FastAPI 服务，通过 HTTP 转发到 OpenClaw |
 | OpenClaw 配置 | `openclaw.json` | ❌ 仅配置 | 模型/fallback/工具开关，属于正常运维操作 |
-| OpenClaw Node.js 代码 | `/usr/lib/node_modules/openclaw/` | ❌ 未修改 | bind mount 只读挂载，容器内代码完全原版 |
-| OpenClaw Docker 镜像 | `clawbowl-openclaw:latest` | ❌ 未修改 | 基于官方镜像构建，未 patch 任何源码 |
+| OpenClaw 安装 | `npm install -g openclaw` | ❌ 官方包 | 全局安装，不修改源码 |
 | Workspace 文件 | `AGENTS.md / SOUL.md / MEMORY.md` | ❌ 配置级 | Agent 行为规则，属于用户数据层，非内核 |
 
-**升级路径**：`docker pull` 新版 OpenClaw → 停旧容器 → 启新容器（复用 config + workspace bind mount）→ 健康检查。我们的所有改动（proxy / iOS / 下载 API）对 OpenClaw 完全透明。
+**升级路径**：停服务 → `npm update -g openclaw` → 启动服务（复用 state 目录）→ 健康检查。我们的所有改动（proxy / iOS / 下载 API）对 OpenClaw 完全透明。
 
 ---
 
@@ -990,13 +999,16 @@ ClawBowl 的三层架构天然保证了隔离性：
 
 | 层 | 技术 |
 |----|------|
-| iOS 客户端 | SwiftUI + MessageStore (JSON) + PhotosUI |
-| 后端控制面 | Python FastAPI + SQLAlchemy + Docker SDK |
-| 执行面 | OpenClaw Gateway (Node.js) in Docker |
+| iOS 客户端 | SwiftUI + ChatViewModel + MarkdownUI + Keychain |
+| 后端控制面 | Python FastAPI + SQLAlchemy + systemd (进程管理) |
+| 执行面 | OpenClaw Gateway (Node.js)，systemd 服务 |
 | 反向代理 | Nginx + Let's Encrypt |
-| LLM 提供商 | ZenMux（聚合国内免费/低成本/旗舰模型） |
-| 数据库 | SQLite（控制面元数据） |
+| LLM 提供商 | ZenMux / OpenRouter（聚合国内免费/低成本/旗舰模型） |
+| 搜索 API | Tavily（Agent 联网搜索） |
+| 数据库 | SQLite（控制面元数据 + 对话持久化） |
 | 认证 | JWT + Keychain（iOS） |
+| 推送 | APNs（HTTP/2 + JWT） |
+| 未来（多用户） | Firecracker MicroVM + KVM 基础设施 |
 
 ---
 
@@ -1004,24 +1016,30 @@ ClawBowl 的三层架构天然保证了隔离性：
 
 ### 16.1 产品定位
 
-**ClawBowl = 个人 AI 助理操作系统**
+**Tarz = 个人 AI Agent 托管平台**
 
-不同于 Manus（一次性任务执行器）或 ChatGPT（无状态对话），ClawBowl 提供的是：
+**产品哲学：极简前端 + 智能后端**
+- 用户看到的只是一个聊天窗口——打开即用，无需理解技术
+- 后端承担所有复杂性：记忆治理、任务调度、沙盒执行、模型路由
+- 灵感来源：观察豆包用户的使用习惯（打开 → 提问 → 关闭），但增加了持久沙盒和记忆管理
+
+不同于 Manus（一次性任务执行器）或 ChatGPT（无状态对话），Tarz 提供的是：
 - 一个**持久化**的 AI 助理，越用越了解你
 - 一个**固定沙盒**，工具和环境持续积累
 - 一个**可版本化的数字灵魂**，可备份、可恢复、可升级
+- 一个**零门槛**的独占 App，系统级推送和设备集成
 
 ### 16.2 与竞品对比
 
-| 维度 | ChatGPT/Kimi | Manus | OpenClaw（原生） | **ClawBowl** |
+| 维度 | ChatGPT/豆包 | Manus | OpenClaw（原生） | **Tarz** |
 |---|---|---|---|---|
 | 沙盒 | 无/临时 | 临时（任务级） | 固化（持久） | **固化（持久）** |
-| 记忆 | 会话级/摘要式 | 任务级（无跨任务记忆） | 持久化（文件级） | **持久化 + 自动沉淀** |
+| 记忆 | 会话级/摘要式 | 任务级（无跨任务） | 持久化（文件级） | **持久化 + 自动沉淀** |
 | 工具执行 | Code Interpreter | 多线程沙盒 | 持久沙盒 | **持久沙盒（工具累积）** |
 | 自动化 | 无 | 无 | cron + heartbeat | **cron + heartbeat + iOS 推送** |
-| 浏览器 | 无 | 有 | 有（Chromium） | **有（Chromium，规划中）** |
+| 浏览器 | 无 | 有 | 有（Chromium） | **有（Chromium）** |
 | 个性化 | 低 | 无 | 高（SOUL/USER.md） | **高（SOUL/USER.md）** |
-| 设备集成 | 无 | 无 | 无 | **日历/提醒/通知（规划中）** |
+| 设备集成 | 无 | 无 | 无 | **日历/提醒/通知** |
 | 部署门槛 | 零 | 零 | **极高** | **零（App 即用）** |
 | 数据主权 | 供应商持有 | 供应商持有 | 用户自有 | **用户自有** |
 | LLM 选择 | 锁定 | 锁定 | 可选 | **可选（国内模型友好）** |
@@ -1029,29 +1047,30 @@ ClawBowl 的三层架构天然保证了隔离性：
 
 ### 16.2.1 竞品痛点深度分析
 
-**Manus 痛点：**
-- **无固化沙盒**：每次任务从零搭建环境（安装依赖、下载数据），重复消耗大量 token 和时间
-- **无跨任务记忆**：上周做的事这周完全不记得，用户必须自己充当记忆体
-- **纯被动执行**：无 cron 调度能力，不能定时自动执行任务
-- **成本不透明**：复杂任务可能消耗大量资源，用户难以预判
+**Manus（Meta）痛点**：
+- **无固化沙盒**：每次任务从零搭建环境，重复消耗大量 token
+- **无跨任务记忆**：上周做的事这周完全不记得
+- **纯被动执行**：无 cron 调度能力
+- **已打通 Telegram**：开始向个人 Agent 方向发展，但缺乏持久化能力
 
-**OpenClaw 痛点：**
+**OpenClaw（OpenAI）痛点**：
 - **部署门槛极高**：需要 Docker、域名、SSL、API Key 等知识，99% 的用户倒在部署阶段
-- **依赖第三方聊天平台**：Telegram/Discord/WhatsApp 对国内用户不友好；企微/飞书需要复杂的应用创建和回调配置
-- **平台体验不一致**：每个聊天平台的消息格式、附件限制、交互能力不同，体验参差不齐
+- **依赖第三方聊天平台**：Telegram/Discord 对国内用户不友好
+- **无官方 iOS 独占 App**：App Store 尚无官方独立应用（国内 Android 生态已有社区部署）
 - **无法感知用户设备**：通过聊天平台中转，无法访问手机日历、提醒等原生功能
 
-**ClawBowl 的差异化定位：**
+**Tarz 的差异化**：
 - 取 Manus 的"强执行力" + OpenClaw 的"固化沙盒与记忆" + 自研 App 的"零门槛体验"
 - 核心价值：**为普通用户提供一个即开即用、越用越聪明的个人 AI 助理**
+- **战略窗口**：OpenAI/Meta 短期不会推出类似产品，因为这会与其现有的 ChatGPT/Manus 形成竞争分流
 
 ### 16.3 核心架构策略
 
-**前端收敛（App 是唯一消息通道）**：不使用 OpenClaw 的 8+ 消息通道，统一通过自有 iOS App 对接用户。这是核心设计决策，不是临时妥协。
+**前端收敛（App 是唯一消息通道）**：不使用 OpenClaw 的 8+ 消息通道，统一通过自有 iOS App 对接用户。这是核心设计决策。
 - 用户体验完全可控，不受第三方平台限制
-- 国内聊天平台（微信/企微/飞书）消息 API 极其复杂且审核严格，普通用户无法配置
+- 系统级推送（APNs）是 Telegram/Discord 中转无法实现的能力
 - 单一入口保证所有交互、记忆、上下文的完整性
-- 未来扩展 Android/Web 客户端时，后端 API 不变，只是增加前端形态
+- 未来扩展 Android/Web 客户端时，后端 API 不变，只增加前端形态
 
 **后端模块化（微内核架构）**：
 ```
@@ -1059,14 +1078,16 @@ iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py�
                            ├── LLM 管理模块（模型切换、计费、限流）
                            ├── 记忆模块（OpenClaw 内置，可替换）
                            ├── 用户数据模块（认证、配额、偏好）
-                           └── 沙盒管理模块（Docker 生命周期）
+                           └── 实例管理模块（systemd / 未来 MicroVM）
 ```
 
 **OpenClaw 定位**：当前作为"能力底座"使用，所有接口抽象化，未来可替换为自建或其他框架。
 
+**基础设施即产品**：Tarz 的核心竞争力不是"跑 OpenClaw"，而是提供一个**可版本化、可恢复、可升级、可重置的数字灵魂托管平台**。OpenClaw 是当前的执行引擎，但托管平台本身才是不可替代的价值。
+
 ---
 
-## 17. 国内 LLM 生态与 ClawBowl 模型策略
+## 17. 国内 LLM 生态与模型策略
 
 > 更新时间：2026-02-15
 
@@ -1141,13 +1162,13 @@ iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py�
 | **MiniMax 2.5** | ~$0.15 | ~$0.15 | 轻量高吞吐 |
 | **Kimi K2.5** | ~$0.50 | ~$1.00 | 推理速度快(39 tok/s) |
 
-> **成本差距惊人**：国内模型成本仅为国际模型的 1/50 ~ 1/200，且均为开源（MIT）。这意味着 ClawBowl 可以在极低成本下提供接近国际顶级的 Agent 能力。
+> **成本差距惊人**：国内模型成本仅为国际模型的 1/50 ~ 1/200，且均为开源（MIT）。这意味着 Tarz 可以在极低成本下提供接近国际顶级的 Agent 能力。
 
 ### 17.3 ZenMux 可用国内模型清单
 
 > 更新时间：2026-02-17
 
-ZenMux 是 ClawBowl 当前的 LLM 聚合层，通过统一的 OpenAI 兼容接口接入多家国内模型。以下为完整清单：
+ZenMux 是 Tarz 当前的 LLM 聚合层，通过统一的 OpenAI 兼容接口接入多家国内模型。以下为完整清单：
 
 #### 深度求索（DeepSeek）
 
@@ -1222,7 +1243,7 @@ ZenMux 是 ClawBowl 当前的 LLM 聚合层，通过统一的 OpenAI 兼容接�
 
 > **注**：豆包的语音/视频能力在火山引擎有独立 API（实时语音模型、TTS、ASR），但在 ZenMux 的 chat completions 接口中，Doubao-Seed-1.8 仅支持图片输入，不支持音频/视频。
 
-### 17.4 ClawBowl 的 LLM 策略
+### 17.4 Tarz 的 LLM 策略
 
 #### 当前 OpenClaw 配置
 
@@ -1251,7 +1272,7 @@ ZenMux 是 ClawBowl 当前的 LLM 聚合层，通过统一的 OpenAI 兼容接�
    - 复杂推理 → 中等成本模型（DeepSeek V4）
    - 关键任务 → 旗舰模型（按需切换）
 4. **开源优先**：GLM-5 和 DeepSeek 均为 MIT 协议，未来可本地部署降低成本
-5. **关注 Agent 能力**：ClawBowl 的核心体验依赖 LLM 的工具调用准确率和多步推理能力，优先选择 Agent 基准分高的模型
+5. **关注 Agent 能力**：Tarz 的核心体验依赖 LLM 的工具调用准确率和多步推理能力，优先选择 Agent 基准分高的模型
 
 #### 风险与对冲
 
@@ -1298,7 +1319,7 @@ Agent 行为：
 | **搜索引擎** | Exa（非原生模型）/ 原生（OpenAI/Anthropic） | 自建搜索服务，支持地理位置过滤 |
 | **免费额度** | 搜索本身收费（即使模型免费） | 搜索本身收费 |
 | **免费模型限流** | 20 req/min, 200 req/day | 未公开 |
-| **已接入 ClawBowl** | ❌ 未接入 | ✅ 已接入 |
+| **已接入 Tarz** | ❌ 未接入 | ✅ 已接入 |
 | **与 OpenClaw 兼容性** | 需改 proxy 添加 `:online` | 需改 proxy 添加 `web_search_options` |
 
 #### 推荐策略：A + 监控
@@ -1352,29 +1373,27 @@ Agent 行为：
 | CDN 兼容性 | Cloudflare 拦截 → SSE 内联 base64 绕过 | ✅ |
 | 错误包装 + LLM 故障转移 | openclaw.json fallbacks + proxy.py 包装 | ✅ |
 
-### Phase 1 — 自主能力 + 基础备份 + UI 优化（进行中）
+### Phase 1 — 自主能力 + 基础备份 + UI 优化 ✅（基本完成）
 
 目标：agent 从"被动回答"进化为"主动行动"，同时建立数据安全网，前端性能接近 Telegram 水准。
 
 | 能力 | 实现方式 | 前端改动 | 后端改动 | 状态 |
 |---|---|---|---|---|
-| ~~**文件下载**~~ | 下载 API + SSE file 事件（详见 8.4） | FileCardView + 预览/分享 | `/api/v2/files/download` + workspace diff | ✅ 已完成 |
-| ~~**对话区富内容展示**~~ | MarkdownUI 渲染 + 图片内联 + 文件卡片 | Markdown 主题 + FileCardView + FileDownloader | SSE file delta 注入 | ✅ 已完成 |
-| ~~**对话区空白修复**~~ | Ready Gate：占位气泡 onAppear → 才发请求 | ChatView ready gate + 无动画滚动 | 无 | ✅ 已完成 |
-| ~~**滚动到底部按钮**~~ | 底部锚点 + 浮动箭头 | ChatView 悬浮按钮 | 无 | ✅ 已完成 |
-| ~~**Stop 按钮**~~ | 中断 SSE 流 + 取消后端请求 | 推理气泡旁 ■ 按钮 | `/api/v2/chat/cancel` | ✅ 已完成 |
-| ~~**Cron 定时任务**~~ | 启用 cron 工具 + 前端管理 UI | CronView 列表 + 状态展示 | cron_router 读 jobs.json + gateway 自动配对 | ✅ 已完成 |
-| ~~**Heartbeat 心跳**~~ | 配置 heartbeat 周期（24h 简化版） | 无（后台自动） | HEARTBEAT.md 安全规则 | ✅ 已完成 |
-| ~~**子 Agent 派生**~~ | sessions_spawn（ping-pong） | 无（透明执行） | openclaw.json 启用 session tools | ✅ 已完成 |
-| ~~**ChatViewModel 架构重构**~~ | MVVM 提取 + 流式节流 + 缓存索引 | ChatViewModel ObservableObject | 无 | ✅ 已完成 |
-| ~~**服务端分页历史**~~ | POST history API + 上滑加载 | ChatView 双向滚动 | `POST /api/v2/chat/history` | ✅ 已完成 |
-| ~~**UI 精简**~~ | toolbar 头像 Menu（定时任务 + 退出） | 替换多按钮为头像菜单 | 无 | ✅ 已完成 |
+| ~~**文件下载**~~ | 下载 API + SSE file 事件（详见 8.4） | FileCardView + 预览/分享 | `/api/v2/files/download` + workspace diff | ✅ |
+| ~~**对话区富内容展示**~~ | MarkdownUI 渲染 + 图片内联 + 文件卡片 | Markdown 主题 + FileCardView + FileDownloader | SSE file delta 注入 | ✅ |
+| ~~**Stop 按钮**~~ | 中断 SSE 流 + 取消后端请求 | 推理气泡旁 ■ 按钮 | `/api/v2/chat/cancel` | ✅ |
+| ~~**Cron 定时任务**~~ | 启用 cron 工具 + 前端管理 UI | CronView 列表 + 状态展示 | cron_router 读 jobs.json + gateway 自动配对 | ✅ |
+| ~~**Heartbeat 心跳**~~ | 配置 heartbeat 周期（24h 简化版） | 无（后台自动） | HEARTBEAT.md 安全规则 | ✅ |
+| ~~**子 Agent 派生**~~ | sessions_spawn（ping-pong） | 无（透明执行） | openclaw.json 启用 session tools | ✅ |
+| ~~**ChatViewModel 架构重构**~~ | MVVM 提取 + 流式节流 + 缓存索引 | ChatViewModel ObservableObject | 无 | ✅ |
+| ~~**服务端分页历史**~~ | POST history API + 上滑加载 | ChatView 双向滚动 | `POST /api/v2/chat/history` | ✅ |
+| ~~**UI 精简**~~ | toolbar 头像 Menu（定时任务 + 退出） | 替换多按钮为头像菜单 | 无 | ✅ |
+| ~~**proxy.py 异步 I/O**~~ | httpx.AsyncClient + asyncio.to_thread | 无 | proxy.py 同步 I/O → 异步 | ✅ |
 | **基础 Snapshot** | tar.zst + manifest.json（详见第 6 章） | 无 | 定时任务 + 控制面 API | 待实现 |
-| **APNs 系统推送** | APNs HTTP/2 + JWT + alert_monitor | NotificationManager + AppDelegate | apns_service + alert_monitor + device_token API | 代码完成，待 Apple Developer Console 配置 |
+| **APNs 系统推送** | APNs HTTP/2 + JWT + alert_monitor | NotificationManager + AppDelegate | apns_service + alert_monitor + device_token API | 代码完成，待 Apple Developer Console |
 | **ClawHub 技能** | 安装社区技能到 workspace/skills/ | 添加"技能市场"入口 | 无（agent 自行安装） | 待实现 |
-| **proxy.py 异步 I/O** | httpx.AsyncClient + asyncio.to_thread | 无 | proxy.py 同步 I/O → 异步 | ✅ 已完成 |
 
-> **为什么 APNs 推送是核心差异化能力？** OpenClaw 挂接 Telegram/Discord 时，推送受限于第三方平台。独占 App + APNs 实现了系统级通知（锁屏、横幅、通知中心），这是 ClawBowl 相对于"OpenClaw + 任何第三方聊天工具"方案的**不可替代差异化能力**，是 Agent 从"被动问答"到"主动服务"的关键闭环。
+> **APNs 推送是核心差异化能力**：独占 App + APNs 实现了系统级通知（锁屏、横幅、通知中心），这是相对于"OpenClaw + 任何第三方聊天工具"方案的**不可替代差异化能力**，是 Agent 从"被动问答"到"主动服务"的关键闭环。
 
 **APNs 推送架构**：
 ```
@@ -1384,75 +1403,64 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
   → 用户点击通知 → App CronView
 ```
 
-**已实现效果**：
-- ✅ 用户说"每小时查询比特币价格" → agent 自动创建 cron → 前端 CronView 可查看
-- ✅ 复杂任务自动拆解为子任务（sessions_spawn）
-- ✅ Stop 按钮：用户可随时中断 AI 推理
-- ✅ 服务端分页：上滑无限回溯历史消息
-- ⏳ Cron 检测到异常（如 BTC 波动 >1%）→ APNs 系统推送（代码完成，待 Apple Developer Console 配置）
-- ⏳ 基础 Snapshot 备份（tar.zst + manifest）
+### Phase 1.5 — Docker 内 OpenClaw 全功能补全
 
-### Phase 2 — 浏览器自动化
+> **目标**：在保持 Docker 容器架构的前提下，升级 OpenClaw 版本并补全所有可在容器内实现的功能，最大化 Agent 能力。
 
-目标：agent 能代替用户操作网页。
-
-| 能力 | 实现方式 | 前端改动 | 后端改动 | 优先级 |
-|---|---|---|---|---|
-| **基础浏览器** | Chromium + Playwright in Docker | 显示截图/结果 | Docker 镜像安装 Chromium | ⭐⭐⭐ |
-| **网页截图** | browser screenshot → 返回图片 | 图片消息展示 | 无 | ⭐⭐ |
-| **表单填写** | browser act (fill/click/type) | 无 | 无 | ⭐⭐ |
-| **多标签页** | browser tabs management | 无 | Premium 配置 | ⭐ |
-
-**预期效果**：
-- "帮我在京东上搜一下 iPhone 16 的价格" → agent 打开浏览器自动操作
-- "截图保存这个网页" → agent 浏览并截图返回
-
-**Docker 镜像改造**：
-```dockerfile
-RUN apt-get install -y chromium
-RUN npx playwright install --with-deps chromium
-```
-
-### Phase 3 — 智能化升级
-
-目标：更强的模型、更丰富的数据源、更智能的工作流。
-
-> **国内网络适配**：Phase 3 的所有功能均基于国内可达的服务和开源方案，不依赖被封锁的境外 API。
-
-| 能力 | 实现方式 | 国内可行性 | 说明 | 优先级 |
-|---|---|---|---|---|
-| **多模型智能路由** | ZenMux 管理模块（无前端选择器） | ✅ 国内模型 | 后端按任务复杂度自动路由：简单→免费模型，复杂→旗舰 | ⭐⭐⭐ |
-| **AI 增强搜索** | Kimi/GLM 搜索增强 API + Tavily 备用 | ✅ 国内直连 | 替代 Perplexity（国内被封锁）；国内 LLM 自带搜索覆盖国内站点更全 | ⭐⭐ |
-| **反爬虫抓取** | 复用 Phase 2 Playwright + Crawl4AI（开源自托管） | ✅ 本地部署 | 替代 Firecrawl（抓取国内站点效果差）；Playwright 已在 Phase 2 部署 | ⭐⭐ |
-| **语义嵌入** | SiliconFlow/bge-large-zh 或 Tencent Youtu | ✅ 国内直连 | 替代 OpenAI/Gemini（国内不可用）；国内模型中文 CMTEB 排名更高 | ⭐⭐ |
-| **Lobster 工作流** | 安装 Lobster CLI（容器内本地运行） | ✅ 无需外网 | 确定性流水线 + 审批门控，不依赖外部网络 | ⭐ |
-| **灵魂 JSON 结构化** | 备份时生成 soul_summary.json（详见第 6 章） | ✅ 本地 | 支持记忆查询、部分恢复、跨系统迁移 | ⭐⭐ |
-
-**国内替代方案说明：**
-
-| 原方案（国内不可用） | 替代方案 | 优势 |
+| 任务 | 说明 | 优先级 |
 |---|---|---|
-| Perplexity API | Kimi 搜索增强 / GLM Web Search / Tavily | 国内站点覆盖更全，中文结果更好 |
-| Firecrawl | Playwright 自建 + Crawl4AI | 免费，对国内反爬虫站点兼容性更好 |
-| OpenAI/Gemini Embeddings | bge-large-zh (SiliconFlow) / Tencent Youtu | CMTEB 中文排名 #1-#2，接口兼容 OpenAI 格式 |
+| **升级 OpenClaw** | 从当前 2026.2.14 → 最新稳定版 2026.2.17+（含 Chromium 预装、cron webhook 等） | ⭐⭐⭐ |
+| **容器内安装 Chromium** | 利用 OpenClaw 2.17+ 的 Docker Chromium 支持，启用浏览器自动化 | ⭐⭐⭐ |
+| **提升容器资源上限** | 内存 1.5GB → 3GB，CPU 0.5 核 → 1.5 核，避免复杂任务 OOM | ⭐⭐⭐ |
+| **修复 cron 真实数据** | MEMORY.md 写入 Tavily 使用指引，消除模拟数据问题 | ⭐⭐ |
+| **容器内安装 SSH** | `apt install openssh-client`，使 Agent 可 SSH 到外部服务器 | ⭐⭐ |
+| **容器内安装 git** | 补充常用工具链（git、ping、ps 等） | ⭐ |
+| **web_search 配置优化** | 确认 Tavily 在容器内稳定可用，更新 openclaw.json 搜索配置 | ⭐⭐ |
+| **功能验证** | 全量功能回归测试（对话、文件、cron、heartbeat、搜索、浏览器） | ⭐⭐⭐ |
 
-### Phase 4 — 平台化
+**已知容器限制（当前接受，远期解决）**：
 
-目标：从单用户工具升级为可运营的平台。
-
-| 能力 | 说明 | 优先级 |
+| 限制 | 影响 | 缓解方案 |
 |---|---|---|
-| **订阅分级实施** | Free/Pro/Premium 模板 + 配额控制 | ⭐⭐⭐ |
-| **多用户资源调度** | `--cpu-shares` 权重分配 + 自动伸缩（详见第 7 章） | ⭐⭐ |
-| **异地备份** | 快照加密后上传 OSS/S3，防宿主机单点故障 | ⭐⭐⭐ |
-| **Android 客户端** | Kotlin/Compose，复用后端 API | ⭐⭐ |
-| **Web 客户端** | React/Vue，轻量版入口 | ⭐⭐ |
-| **多用户容器编排** | K8s / Docker Swarm | ⭐ |
-| **Canvas WebView** | iOS App 内嵌 WebView 替代 node Canvas | ⭐ |
+| Tailscale/VPN 不可用 | Agent 无法进行设备组网 | 接受限制，用户需求时告知 |
+| 无 systemd | Agent 无法管理系统服务 | 使用 OpenClaw 内置 cron 替代 |
+| 无 `/dev/net/tun` | 无法建立 VPN 隧道 | 接受限制 |
+| 端口绑定受限 | 仅映射 gateway 端口 | 按需在 Docker 启动时添加端口映射 |
+| GFW 外网限制 | Google/CoinGecko 等海外 API 不可达 | 与容器无关，使用 Tavily 等国内可达服务替代 |
 
-> 注：基础 Snapshot 已在 Phase 1 实现，此处的重点是**异地冗余**和**多用户场景下的自动扩缩容**。
+### Phase 2 — 单用户功能完善
 
-### Phase 5 — OpenClaw 替换（远期）
+目标：在 Docker 容器环境下完善全部单用户功能，追求产品体验极致。
+
+| 能力 | 实现方式 | 说明 | 优先级 |
+|---|---|---|---|
+| **浏览器自动化** | Chromium + Playwright（容器内，Phase 1.5 已安装） | Agent 代替用户操作网页 | ⭐⭐⭐ |
+| **多模型智能路由** | ZenMux/OpenRouter 管理模块 | 按任务复杂度自动路由：简单→免费，复杂→旗舰 | ⭐⭐⭐ |
+| **极简前端改造** | 进一步精简 iOS UI | 对标豆包体验：打开→聊天→关闭 | ⭐⭐ |
+| **人格化增强** | SOUL.md 深度定制 + 提示词工程 | 幽默感、个性化语气等 | ⭐⭐ |
+| **AI 增强搜索** | Kimi/GLM 搜索 + Tavily 备用 | 替代 Perplexity（被封锁） | ⭐⭐ |
+| **语义嵌入** | SiliconFlow/bge-large-zh | 中文 CMTEB 排名 #1-#2 | ⭐⭐ |
+| **反爬虫抓取** | Playwright + Crawl4AI（本地部署） | 替代 Firecrawl | ⭐ |
+| **灵魂 JSON 结构化** | soul_summary.json（详见第 6 章） | 支持记忆查询/部分恢复/跨系统迁移 | ⭐⭐ |
+| **Webhook** | OpenClaw 2.17+ 内置 webhook 支持 | 外部事件 → Agent 触发 | ⭐ |
+| **Lobster 工作流** | Lobster CLI 本地运行 | 确定性流水线 + 审批门控 | ⭐ |
+
+### Phase 3 — 多用户 + 运行环境演进（远期）
+
+目标：支持多用户，按需评估从 Docker 到更强隔离方案的迁移。
+
+> **前置条件**：产品验证 + 用户增长到需要多用户支持的阶段。
+
+| 任务 | 说明 | 优先级 |
+|---|---|---|
+| **多用户 Docker 编排** | 每用户一个容器，Docker Compose / Swarm 管理 | ⭐⭐⭐ |
+| **RuntimeBackend 抽象** | instance_manager 抽象为接口（Docker / 未来方案可切换） | ⭐⭐⭐ |
+| **订阅分级实施** | Free/Pro/Premium 模板 + 资源配额 | ⭐⭐ |
+| **异地备份** | 快照加密后上传 OSS/S3 | ⭐⭐ |
+| **多端客户端** | Android (Kotlin/Compose) + Web (React/Vue) | ⭐⭐ |
+| **去容器化评估** | 评估 MicroVM（Firecracker）或 VPS 裸跑方案（需 KVM 基础设施） | ⭐ |
+
+### Phase 4 — OpenClaw 替换（远期）
 
 目标：逐步用自建模块替换 OpenClaw，降低外部依赖。
 
@@ -1475,7 +1483,7 @@ RUN npx playwright install --with-deps chromium
 
 ### 19.1 问题背景
 
-当前用户开通时，`instance_manager._create_instance()` 只生成 `openclaw.json`，workspace 目录完全为空。所有 `.md` 文件（AGENTS/SOUL/USER/MEMORY/HEARTBEAT）均为手动创建，无法复现。平台部署配置（systemd、nginx）也未纳入版本管理。
+当前用户开通时，`instance_manager` 只生成 `openclaw.json`，workspace 目录完全为空。所有 `.md` 文件（AGENTS/SOUL/USER/MEMORY/HEARTBEAT）均为手动创建，无法复现。平台部署配置（Docker、nginx）也未纳入版本管理。
 
 **目标**：为每个 Phase 的功能收尾定义"配置落地"检查项，确保新用户开通时自动获得完整、一致的初始环境。
 
@@ -1484,18 +1492,18 @@ RUN npx playwright install --with-deps chromium
 配置分为三层，从外到内逐级生成：
 
 ```
-┌─ Layer 1: 平台层（一次性部署，整个集群共享）──────────────┐
-│  .env                 后端环境变量                         │
-│  clawbowl.service     systemd 服务单元                     │
-│  nginx/clawbowl.conf  反向代理 + SSL                       │
-│  docker/Dockerfile    OpenClaw 容器镜像构建                 │
-│  deploy/              部署脚本 + 运维 Runbook               │
+┌─ Layer 1: 平台层（一次性部署，整个 VPS 共享）────────────┐
+│  .env                    后端环境变量                       │
+│  docker-compose.yml      Docker 编排配置                     │
+│  Dockerfile.openclaw     OpenClaw 容器镜像定义               │
+│  nginx/tarz.conf         反向代理 + SSL                     │
+│  deploy/                 部署脚本 + 运维 Runbook             │
 └───────────────────────────────────────────────────────────┘
-┌─ Layer 2: 容器层（每用户自动生成）───────────────────────┐
-│  config/openclaw.json    运行时配置（模型/工具/gateway）   │
-│  config/cron/jobs.json   空初始 cron 配置                  │
-│  config/devices/         gateway 自动配对凭证              │
-│  config/identity/        设备身份（运行时自动生成）        │
+┌─ Layer 2: OpenClaw 实例层（每用户自动生成）──────────────┐
+│  state/openclaw.json       运行时配置（模型/工具/gateway） │
+│  state/cron/jobs.json      空初始 cron 配置                │
+│  state/devices/            gateway 自动配对凭证            │
+│  state/identity/           设备身份（运行时自动生成）      │
 └───────────────────────────────────────────────────────────┘
 ┌─ Layer 3: 工作区层（每用户初始化，Agent 的"出生包"）────┐
 │  workspace/AGENTS.md     行为规则 + 安全约束 + 工具指南    │
@@ -1517,10 +1525,11 @@ RUN npx playwright install --with-deps chromium
 backend/templates/
 ├── platform/
 │   ├── env.example              # .env 完整示例（含所有配置项）
-│   ├── clawbowl.service         # systemd 单元模板
-│   ├── nginx-clawbowl.conf      # nginx vhost 模板
+│   ├── docker-compose.yml       # Docker 编排模板
+│   ├── Dockerfile.openclaw      # OpenClaw 容器镜像模板
+│   ├── nginx-tarz.conf          # nginx vhost 模板
 │   └── deploy-checklist.md      # 部署检查清单
-├── container/
+├── instance/
 │   ├── openclaw-free.json       # 免费版 openclaw 模板
 │   ├── openclaw-premium.json    # 高级版 openclaw 模板
 │   └── cron-init.json           # {"version":1,"jobs":[]}
@@ -1536,7 +1545,7 @@ backend/templates/
             └── SKILL.md
 ```
 
-`instance_manager._create_instance()` 在创建容器时，自动从 `workspace/` 模板渲染并写入用户 workspace。
+`instance_manager` 在创建用户实例时，自动从 `workspace/` 模板渲染并写入用户 workspace。
 
 ### 19.4 模板变量
 
@@ -1557,7 +1566,7 @@ backend/templates/
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
-| 0.1 | `openclaw-free.json` 模板 | ✅ 已有 | `docker/openclaw-template-free.json`，含占位符 |
+| 0.1 | `openclaw-free.json` 模板 | ✅ 已有 | `instance/openclaw-free.json`，含占位符 |
 | 0.2 | `config_generator.py` | ✅ 已有 | 根据 tier 渲染 openclaw.json |
 | 0.3 | `.env.example` 更新 | ⬜ 待做 | 补充 APNs / Tavily / OpenRouter 等新增配置项 |
 | 0.4 | `AGENTS.md` 基线模板 | ⬜ 待做 | 提取当前 test1 的 AGENTS.md 为 `.j2` 模板 |
@@ -1573,223 +1582,200 @@ backend/templates/
 | 1.1 | `AGENTS.md` 模板增强 | ⬜ 待做 | 加入 Cron 工具说明、Safety Rules、Heartbeat 指南 |
 | 1.2 | `HEARTBEAT.md` 安全模板 | ⬜ 待做 | 24h 周期、仅记忆维护 + 状态检查，禁止高危操作 |
 | 1.3 | `cron-init.json` | ⬜ 待做 | 空 jobs 初始化，确保 CronView 不报错 |
-| 1.4 | `clawbowl.service` 模板 | ⬜ 待做 | systemd 单元纳入版本管理 |
-| 1.5 | `nginx-clawbowl.conf` 模板 | ⬜ 待做 | nginx 配置纳入版本管理 |
+| 1.4 | `docker-compose.yml` 模板 | ⬜ 待做 | Docker 编排配置纳入版本管理 |
+| 1.5 | `nginx-tarz.conf` 模板 | ⬜ 待做 | nginx 配置纳入版本管理 |
 | 1.6 | `.env.example` 再次更新 | ⬜ 待做 | APNs key_path / key_id / team_id 等 |
 | 1.7 | `skills/realtime-data/` 预装 | ⬜ 待做 | 实时数据技能预装到 workspace 模板 |
 
-#### Phase 2 收尾 — 多用户就绪
+#### Phase 1.5 收尾 — Docker 全功能补全
+
+| # | 任务 | 状态 | 说明 |
+|---|---|---|---|
+| 1.5.1 | OpenClaw 升级到 2.17+ | ⬜ 待做 | 更新 Docker 镜像，获得 Chromium 预装、cron webhook 等 |
+| 1.5.2 | 容器资源上限调整 | ⬜ 待做 | 修改 instance_manager 创建参数：内存 3GB、CPU 1.5 核 |
+| 1.5.3 | 容器内工具链补全 | ⬜ 待做 | SSH、git、ping 等常用工具安装到 Docker 镜像 |
+| 1.5.4 | 全量功能回归测试 | ⬜ 待做 | 对话、文件、cron、heartbeat、搜索、浏览器自动化 |
+
+#### Phase 2 收尾 — 单用户功能完善
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
 | 2.1 | `openclaw-premium.json` 完善 | ⬜ 待做 | Premium 模板差异化（更多模型、更大上下文） |
-| 2.2 | `docker-compose.yml` | ⬜ 待做 | 多容器编排（backend + nginx + 多用户实例池） |
-| 2.3 | `deploy/` 部署脚本 | ⬜ 待做 | 一键部署脚本 + 运维 Runbook |
-| 2.4 | 用户 Onboarding 问卷 | ⬜ 待做 | 首次登录收集名字/语言/偏好 → 渲染个性化模板 |
-| 2.5 | `SOUL.md` 个性化生成 | ⬜ 待做 | 根据用户偏好 LLM 生成定制人格描述 |
-| 2.6 | 共享技能库 | ⬜ 待做 | `skills/` 目录支持从 ClawHub 安装社区技能 |
+| 2.2 | `deploy/` 部署脚本 | ⬜ 待做 | 一键部署脚本 + 运维 Runbook |
+| 2.3 | 用户 Onboarding 问卷 | ⬜ 待做 | 首次登录收集名字/语言/偏好 → 渲染个性化模板 |
+| 2.4 | `SOUL.md` 个性化生成 | ⬜ 待做 | 根据用户偏好 LLM 生成定制人格描述 |
+| 2.5 | 共享技能库 | ⬜ 待做 | `skills/` 目录支持从 ClawHub 安装社区技能 |
 
-#### Phase 3+ 收尾 — MicroVM 与规模化
+#### Phase 3 收尾 — 多用户 + 运行环境演进
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
-| 3.1 | MicroVM rootfs 镜像构建脚本 | ⬜ 待做 | 基于 Alpine/Debian 的最小根文件系统 |
-| 3.2 | `microvm-manager.py` | ⬜ 待做 | Firecracker API 替换 Docker SDK |
-| 3.3 | 用户数据迁移工具 | ⬜ 待做 | Docker bind mount → virtio-blk 迁移 |
-| 3.4 | 多 tier 资源配额配置 | ⬜ 待做 | CPU/内存/存储按 tier 差异化分配 |
+| 3.1 | 多用户 Docker 编排方案 | ⬜ 待做 | Docker Compose / Swarm，每用户独立容器 |
+| 3.2 | RuntimeBackend 抽象层 | ⬜ 待做 | instance_manager 接口化（Docker / 未来方案可切换） |
+| 3.3 | 多 tier 资源配额配置 | ⬜ 待做 | CPU/内存/存储按 tier 差异化分配 |
+| 3.4 | 去容器化方案评估 | ⬜ 待做 | 评估 MicroVM / VPS 裸跑方案的可行性和收益 |
 
 ---
 
 ## 20. 当前阶段实施优先级
 
-> 更新：2026-02-20
+> 更新：2026-02-19
 
 **已完成** ✅（Phase 0 — 核心基础）：
-1. ~~容器目录结构~~
-2. ~~多模态文件 inbox 机制~~
-3. ~~持久会话 + 记忆系统~~
-4. ~~推理过程/最终结果分离~~
-5. ~~TOOLS.md 自动维护~~
-6. ~~**前端流式性能优化**~~（SSE 节流 100ms + 自定义 Equatable + 图片异步解码 + 异步加载）
-7. ~~**对话全量持久化**~~（chat_logs 表 + SSE 中断 try/finally 保障）
-8. ~~**内容安全过滤**~~（0-chunk 检测 + filtered 事件 + 前端自动清洗 + 后端审计保留）
-9. ~~**错误包装 + LLM 故障转移**~~（openclaw.json fallbacks + proxy.py 错误包装 + 前端兜底）
-10. ~~**文件下载功能**~~（下载 API + workspace diff + SSE file 事件 + CDN base64 内联 → POST 绕过）
-11. ~~**对话区富内容展示**~~（MarkdownUI + 图片缩略图/全屏查看 + 文件卡片 + QLPreview）
-12. ~~**修复对话区刷新空白 Bug**~~（Ready Gate 机制）
-13. ~~**滚动到底部浮动按钮**~~（底部锚点 + UIKit KVO 检测 + 非对称去抖）
-14. ~~**Workspace Diff 性能优化**~~（os.walk + 目录剪枝，1069ms → 1.1ms）
-15. ~~**Agent 时间感知**~~（system + user 双重日期注入，已知局限见 17.5）
-16. ~~**CDN 兼容性**~~（Cloudflare HTML 拦截 → POST 请求绕过，适用于 cron/file API）
+1. ~~目录结构 + 多模态文件 inbox~~
+2. ~~持久会话 + 记忆系统~~
+3. ~~推理过程/最终结果分离 + TOOLS.md 自动维护~~
+4. ~~前端流式性能优化~~（SSE 节流 + 自定义 Equatable + 图片异步解码）
+5. ~~对话全量持久化~~（chat_logs 表 + SSE 中断 try/finally 保障）
+6. ~~内容安全过滤~~（0-chunk 检测 + filtered 事件 + 前端自动清洗）
+7. ~~错误包装 + LLM 故障转移~~（openclaw.json fallbacks + proxy.py 错误包装）
+8. ~~文件下载 + 对话区富内容展示~~（MarkdownUI + 图片 + 文件卡片 + QLPreview）
+9. ~~Workspace Diff 性能优化~~（os.walk + 目录剪枝，1069ms → 1.1ms）
+10. ~~Agent 时间感知 + CDN 兼容性~~（POST 请求绕过 Cloudflare 拦截）
 
 **已完成** ✅（Phase 1 — 自主能力 + UI 优化）：
-1. ~~**Stop 按钮**~~（前端即停 SSE，后端异步 cancel）
-2. ~~**Cron + Heartbeat**~~（启用 cron 工具 + HEARTBEAT.md 24h 安全心跳 + 前端 CronView）
-3. ~~**sessions_spawn**~~（子 Agent 派生，openclaw.json 启用）
-4. ~~**前端定时任务管理 UI**~~（CronView 列表 + 详情页 + 状态/错误/下次执行展示）
-5. ~~**proxy.py 异步 I/O**~~（httpx.AsyncClient + asyncio.to_thread，消除同步阻塞）
-6. ~~**ChatViewModel 架构重构**~~（MVVM 提取，所有业务逻辑移出 ChatView）
-7. ~~**服务端分页历史 API**~~（POST /api/v2/chat/history + 上滑加载 + 去重）
-8. ~~**UI 精简**~~（toolbar 头像 Menu 合并入口）
-9. ~~**容器空闲保护**~~（idle_reaper 跳过有 cron 的实例，防止误停）
-10. ~~**Gateway 自动配对**~~（instance_manager 启动时自动审批 pending 设备）
-11. ~~**APNs 推送**~~（代码完成：backend device_token + apns_service + alert_monitor + frontend NotificationManager）
-12. ~~**AGENTS.md Cron 工具指南**~~（内置 cron add/delete/list 说明，禁止系统 crontab）
+1. ~~Stop 按钮~~（前端即停 SSE，后端异步 cancel）
+2. ~~Cron + Heartbeat~~（cron 工具 + HEARTBEAT.md + CronView 列表/详情）
+3. ~~sessions_spawn + Gateway 自动配对~~
+4. ~~ChatViewModel 架构重构~~（MVVM + 服务端分页历史）
+5. ~~UI 精简~~（头像 Menu + 容器空闲保护）
+6. ~~proxy.py 异步 I/O~~
+7. ~~APNs 推送代码~~（待 Apple Developer Console 配置）
+8. ~~AGENTS.md Cron 工具指南~~
 
-**Phase 1 待完成**：
-1. **APNs Apple Developer Console 配置**（用户操作：创建 p8 Key，上传服务器）
-2. **基础 Snapshot 备份**（tar.zst + manifest，为后续自动化兜底）
-3. **ClawHub 技能市场**（安装社区技能到 workspace/skills/）
-4. **用户初始配置文件集落地**（详见第 19 章 Phase 0/1 收尾清单）
+**当前：Phase 1 收尾 + Phase 1.5 Docker 全功能补全**：
+1. **升级 OpenClaw 至 2.17+**（Chromium 预装、cron webhook、最新修复）
+2. **容器资源上限调整**（内存 3GB、CPU 1.5 核）
+3. **APNs Apple Developer Console 配置**（用户操作：创建 p8 Key）
+4. **基础 Snapshot 备份**（tar.zst + manifest）
+5. **用户初始配置文件集落地**（详见第 19 章）
+6. **前端 UI 优化**（聊天框命令按钮 + 附件按钮、定时任务手动编辑/删除）
+7. **推荐指令库集成**（2000 条指令，首次启动 + 空闲时推荐）
 
-**后续做**（Phase 2-3）：
-1. Docker 镜像安装 Chromium + Playwright
-2. 浏览器自动化启用
-3. 多模型智能路由（ZenMux 按任务复杂度自动切换）
-4. 语义嵌入升级（SiliconFlow/bge 或 Tencent Youtu）
-5. AI 增强搜索（Kimi/GLM 搜索 + Tavily）
-6. 灵魂 JSON 结构化提取（soul_summary.json）
-7. **多用户配置落地**（详见第 19 章 Phase 2 收尾清单）
+**下一步**（Phase 2 — 单用户功能完善）：
+1. 浏览器自动化（Chromium + Playwright，容器内已安装）
+2. 多模型智能路由
+3. 极简前端改造
+4. 人格化增强
+5. AI 增强搜索 + 语义嵌入
+6. 灵魂 JSON 结构化
 
-**长期规划**（Phase 4-5）：
-1. 订阅分级 + token 计量计费
-2. 异地加密备份（OSS/S3）
-3. 多端客户端（Android/Web）
-4. **多用户 + MicroVM 改造**（详见第 21/22 章）
+**长期规划**（Phase 3-4）：
+1. 多用户 Docker 编排 + 订阅分级
+2. 多端客户端
+3. 异地加密备份
+4. 去容器化评估（MicroVM / VPS 裸跑，需 KVM 基础设施）
 5. OpenClaw 模块逐步替换
 
 ---
 
-## 21. 架构核心总结
+## 21. 已知问题
 
-ClawBowl 的核心不是"跑 OpenClaw"。
+### 21.1 免费 LLM 对 OpenClaw 专有工具的语义误解
 
-而是：**为每个用户维护一个可版本化、可恢复、可升级、可重置的"数字灵魂实例"。**
+免费国产 LLM（deepseek-chat、glm-4.6v-flash、mimo-v2-flash）训练数据中不包含 OpenClaw，导致 LLM 将 OpenClaw 专有工具名映射到已知的 Linux 概念上。典型案例：LLM 把内置 `cron` 工具（API 函数调用）误解为 Linux `crontab` 命令，转而用 `exec` 运行 shell 脚本。
+
+**影响范围**：与 Linux 概念同名但语义不同的工具（cron、gateway、sessions_spawn 等）；与 Linux 语义一致的工具（read/write/exec）不受影响。
+
+**当前缓解措施**：TOOLS.md 显式标注工具用法 + proxy.py 在关键词触发时注入系统消息。
+
+**容器环境的影响**：容器内系统 crontab 不存在，当 LLM 误将 `cron` 工具理解为系统 `crontab` 并尝试执行时，会遇到"命令不存在"错误并进一步回退到 shell 脚本方案。
+
+**当前缓解**：proxy.py 在检测到 cron 关键词时注入系统消息，强制引导 LLM 使用正确的 API。
+
+**未来方案**：考虑用 Skill 机制注入更完整的工具使用指南（token 免费，可以不惜篇幅）。
+
+### 21.2 Docker 容器能力限制
+
+当前 Docker 容器存在以下已知限制：
+
+| 受限能力 | 影响 | 缓解策略 |
+|---|---|---|
+| Tailscale/VPN | Agent 无法进行设备组网 | 接受限制，远期评估去容器化 |
+| 系统 crontab | LLM 混淆时连锁失败 | proxy.py 注入 + TOOLS.md 引导 |
+| Chromium 浏览器 | 浏览器自动化不可用 | Phase 1.5 升级 OpenClaw 2.17+（含 Chromium 预装） |
+| 资源上限 | 0.5 核 + 1.5GB 不足 | Phase 1.5 调整到 1.5 核 + 3GB |
+| SSH 客户端 | Agent 无法远程操作服务器 | Phase 1.5 在镜像中安装 |
+| 端口绑定 | 仅映射 gateway 端口 | 按需添加端口映射 |
+
+> 注：阿里云和腾讯云的常规云服务器均不支持嵌套虚拟化，裸金属服务器支持但成本较高。去容器化/MicroVM 方案推迟到多用户阶段再评估。
+
+---
+
+## 22. 架构核心总结
+
+Tarz 的核心不是"跑 OpenClaw"。
+
+而是：**为每个用户维护一个可版本化、可恢复、可升级、可重置的"数字灵魂实例"——一个托管式 AI Agent 平台。**
 
 - 控制面管理生命周期
 - 执行面提供自由
 - 版本库保证安全与可控
 - OpenClaw 是当前的能力底座，但不是不可替代的依赖
-- 宿主机是服务者，不是控制者（详见 2.3 节）
-- Docker 是过渡方案，MicroVM 是终局（详见第 22 章）
+- Backend 是服务者，不是控制者（详见 2.3 节）
+- 当前运行环境：Docker 容器，优先在容器内实现全功能
 
 **核心资产（不可替代）**：
-- iOS App（用户交互层）
-- 后端 API Gateway + proxy.py（控制层 — 运行时无关，Docker/MicroVM 切换不影响）
+- iOS App（用户交互层 — 独占 App + APNs 推送）
+- 后端 API Gateway + proxy.py（控制层 — 运行时无关，容器/裸跑/MicroVM 切换不影响）
 - 用户体系 + 数据库
-- 编排逻辑（当前 Docker SDK，未来 Firecracker API）
-- 产品设计思路（固定沙盒 + 持久记忆 + 成长型助手）
+- 编排逻辑（当前 Docker SDK 管理，可抽象为 RuntimeBackend 接口）
+- 产品设计思路（极简前端 + 固定沙盒 + 持久记忆 + 成长型助手）
 
 **可替换模块（供应商）**：
-- OpenClaw（沙盒 + Agent Loop）→ 可自建
-- DeepSeek / GLM / Qwen / ZenMux（LLM 提供商）→ 多模型智能路由
+- OpenClaw（沙盒 + Agent Loop）→ 可自建（Phase 4）
+- DeepSeek / GLM / Qwen / ZenMux / OpenRouter（LLM 提供商）→ 多模型智能路由
 - Tavily / Kimi 搜索 / GLM Web Search（搜索 API）→ 多供应商互备
 - SiliconFlow/bge / Tencent Youtu（语义嵌入）→ 国内可达，兼容 OpenAI 格式
 - Playwright + Crawl4AI（反爬虫抓取）→ 开源自托管
 
 ---
 
-## 22. 容器化局限性与 MicroVM 演进路线
+## 23. Docker 容器限制与远期备选方案
 
-> 更新：2026-02-19
+> 更新：2026-02-20
 
-### 21.1 Docker 容器的固有限制
+### 23.1 当前容器能力评估
 
-OpenClaw 运行在 Docker 容器中（非 privileged），这带来了一系列不可避免的能力限制：
+Phase 0-1 在 Docker 容器中运行 OpenClaw，已确认的能力边界：
 
-| 受限能力 | 问题 | 严重程度 | 当前解决方案 |
+| 能力 | 容器内状态 | 严重度 | Phase 1.5 解决方案 |
 |---|---|---|---|
-| **VPN/组网** | Tailscale/WireGuard 需要 TUN 设备和 NET_ADMIN 权限，容器内无法使用 | 高 | 宿主机安装 Tailscale → 共享给容器（仅单用户场景可行） |
-| **系统服务** | systemd/cron daemon 等系统级服务无法在容器内运行 | 中 | OpenClaw 自带 cron 工具替代 |
-| **内核模块** | 无法加载自定义内核模块（如 FUSE 文件系统） | 中 | 不影响当前功能 |
-| **设备访问** | 无法访问 USB、GPU 等硬件设备 | 低 | Agent 不需要直接硬件访问 |
-| **网络隔离** | 容器网络受限，无法自定义路由表 | 中 | 宿主机代理网络请求 |
-| **多租户隔离** | 共享内核，逃逸风险存在（CVE 记录） | 高（多用户） | 单用户阶段可接受，多用户必须升级 |
+| **Chromium 浏览器** | 未安装 | 高 | 升级 OpenClaw 2.17+（含 Chromium 预装） |
+| **资源上限** | 0.5 核 + 1.5GB | 中 | 调整为 1.5 核 + 3GB |
+| **SSH 客户端** | 未安装 | 中 | Docker 镜像中安装 |
+| **常用工具** | 缺 git/ping/ps | 低 | Docker 镜像中安装 |
+| **Tailscale/VPN** | 无 TUN 设备 | 高 | **当前接受限制** |
+| **系统 crontab** | 无 cron daemon | 中 | **使用 OpenClaw 内置 cron** |
+| **systemd** | 不可用 | 低 | **不影响核心功能** |
+| **端口绑定** | 仅映射 gateway 端口 | 低 | **按需添加映射** |
+| **GFW 限制** | 海外 API 不可达 | 低 | **与容器无关，用 Tavily 替代** |
 
-**核心矛盾**：Agent 的能力上限取决于运行环境的能力上限。Docker 容器的 namespace 隔离本质上是"受限的进程"，而非"完整的操作系统"。随着 Agent 功能增强，这些限制会越来越成为瓶颈。
+**结论**：通过升级 OpenClaw 版本和调整资源配置，9 项限制中的 **4 项可在 Phase 1.5 解决**，3 项有替代方案可绕过，仅 Tailscale/VPN 是当前无法在容器内解决的硬限制。
 
-### 21.2 解决方案对比
+### 23.2 远期备选方案（多用户阶段评估）
 
-| 方案 | 隔离级别 | 启动速度 | 资源消耗 | VPN/网络 | 多租户安全 | 复杂度 |
-|---|---|---|---|---|---|---|
-| **Docker（当前）** | namespace | <1s | 低 | ❌ | 中 | 低 |
-| **Docker privileged** | 弱 | <1s | 低 | ✅ | ❌ 危险 | 低 |
-| **gVisor/Kata** | 用户态内核 | 1-3s | 中 | 部分 | 高 | 中 |
-| **MicroVM (Firecracker)** | 硬件虚拟化 | <150ms | 低（约 5MB） | ✅ | 极高 | 高 |
-| **传统 VM (QEMU/KVM)** | 硬件虚拟化 | 10-30s | 高 | ✅ | 极高 | 高 |
+当产品验证完成、用户增长到需要多用户支持时，可评估以下运行环境方案：
 
-### 21.3 MicroVM 方案（Firecracker）
+| 方案 | 隔离级别 | 启动速度 | VPN/网络 | 前置条件 |
+|---|---|---|---|---|
+| **多容器 Docker** | namespace | <1s | ❌ | 无（当前即可） |
+| **gVisor/Kata** | 用户态内核 | 1-3s | 部分 | 需验证兼容性 |
+| **MicroVM (Firecracker)** | 硬件虚拟化 | <150ms | ✅ | 需 KVM 基础设施 |
+| **VPS 裸跑** | 进程级 | 即时 | ✅ | 单用户或强信任环境 |
 
-**Firecracker**（AWS Lambda/Fargate 底层）是最适合 ClawBowl 的长期方案：
+> **基础设施现实**：阿里云、腾讯云的常规云服务器均不支持嵌套虚拟化。MicroVM 方案需迁移到裸金属服务器，成本和复杂度较高。当前阶段不做提前投入。
 
-- **启动速度 <150ms**：接近 Docker，远优于传统 VM
-- **内存开销约 5MB/VM**：可在单台宿主机运行数百个实例
-- **完整 Linux 内核**：每个用户获得独立内核，Tailscale/WireGuard/systemd 全部可用
-- **硬件级隔离**：KVM 虚拟化，安全性远超 Docker namespace
-- **简约设计**：仅暴露少量设备（virtio-net, virtio-block），攻击面极小
+### 23.3 架构兼容性设计
 
-**MicroVM 架构预览**：
+当前架构已为未来运行环境切换做了预留：
 
-```
-┌─ iOS App ──────────────────────────────────────────┐
-│                                                     │
-└─────────────────────────────────────────────────────┘
-           ↕ HTTPS + SSE
-┌─ 宿主机 Backend ───────────────────────────────────┐
-│  proxy.py / auth / 备份 / APNs                      │
-│  ┌─ Firecracker VMM ─────────────────────────────┐ │
-│  │  ┌─ MicroVM (User A) ──────────────────────┐  │ │
-│  │  │  完整 Linux: OpenClaw + Tailscale + ...  │  │ │
-│  │  └─────────────────────────────────────────┘  │ │
-│  │  ┌─ MicroVM (User B) ──────────────────────┐  │ │
-│  │  │  完整 Linux: OpenClaw + Tailscale + ...  │  │ │
-│  │  └─────────────────────────────────────────┘  │ │
-│  └───────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────┘
-```
+| 组件 | 切换运行环境时的迁移成本 |
+|---|---|
+| iOS App 全部代码 | 零（完全不变） |
+| proxy.py 消息路由 | 零（HTTP API 不变） |
+| 用户体系 + 数据库 | 零 |
+| instance_manager.py | 中（需实现新的 RuntimeBackend） |
+| 数据存储 | 低（bind mount → 目标方案的存储层） |
 
-### 21.4 演进路线
-
-**阶段 1（当前）：单用户 Docker，完整复现功能**
-
-```
-目标：在 Docker 容器中完整跑通 OpenClaw + App 全部功能
-限制：已知 Tailscale 等无法使用，通过宿主机侧方案绕行
-状态：进行中
-```
-
-**阶段 2：多用户 Docker，验证产品模型**
-
-```
-目标：支持 10-50 用户同时使用，验证订阅模型和运营可行性
-改造：Docker Compose / Swarm 编排 + 用户隔离 + 资源配额
-限制：共享内核，安全隔离不够强；网络能力仍受限
-```
-
-**阶段 3：MicroVM 迁移，生产级部署**
-
-```
-目标：每用户独立 MicroVM，完整操作系统能力 + 硬件级隔离
-改造：
-  - 制作 rootfs 镜像（OpenClaw + 基础工具链）
-  - Firecracker API 替换 Docker SDK
-  - virtio-blk 持久存储替换 bind mount
-  - virtio-net + TAP 网络替换 Docker bridge
-  - 快照 = VM snapshot（毫秒级恢复）
-收益：Tailscale/VPN 可用、systemd 可用、安全性达标、启动 <150ms
-```
-
-**迁移兼容性设计**：
-
-当前 Docker 架构的设计已为未来 MicroVM 迁移做了预留：
-
-| 当前（Docker） | 未来（MicroVM） | 迁移成本 |
-|---|---|---|
-| bind mount 持久化 | virtio-blk 块设备 | 中（换存储驱动） |
-| HTTP API 通信 | HTTP API 通信（不变） | 零 |
-| Docker SDK 生命周期 | Firecracker API 生命周期 | 中（换编排层） |
-| `instance_manager.py` | `microvm_manager.py` | 中（API 类似） |
-| proxy.py 消息路由 | proxy.py 消息路由（不变） | 零 |
-| iOS App 全部代码 | iOS App 全部代码（不变） | 零 |
-
-**核心结论**：proxy.py 消息层和 iOS App 完全不受影响，迁移成本集中在后端编排层（将 Docker SDK 调用替换为 Firecracker API 调用）。这是当前"宿主机作为服务者"架构的优势——后端代理层与容器运行时解耦。
+**核心结论**：proxy.py 和 iOS App 完全不受运行环境影响。迁移成本集中在 `instance_manager` 编排层，可通过 `RuntimeBackend` 抽象接口最小化。这是"Backend 作为服务者"架构的优势——代理层与运行时解耦。
