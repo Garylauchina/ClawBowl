@@ -1619,6 +1619,8 @@ backend/templates/
 | 2.3 | 用户 Onboarding 问卷 | ⬜ 待做 | 首次登录收集名字/语言/偏好 → 渲染个性化模板 |
 | 2.4 | `SOUL.md` 个性化生成 | ⬜ 待做 | 根据用户偏好 LLM 生成定制人格描述 |
 | 2.5 | 共享技能库 | ⬜ 待做 | `skills/` 目录支持从 ClawHub 安装社区技能 |
+| 2.6 | Gateway 繁忙排队提示 | ✅ 完成 | SSE 空闲心跳 + maxConcurrent 1→2，防止超时显示"网络连接异常" |
+| 2.7 | App 恢复时同步遗漏结果 | ⬜ 待做 | 读取 Gateway session JSONL，补充断连期间完成的 assistant 回复（方案见 plan） |
 
 #### Phase 3 收尾 — 多用户 + 运行环境演进
 
