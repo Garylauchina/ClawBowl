@@ -32,7 +32,7 @@
     "defaults": {
       "model": { "primary": "{{ PRIMARY_MODEL }}" },
       "workspace": "/data/workspace",
-      "maxConcurrent": 1,
+      "maxConcurrent": 2,
       "subagents": { "maxConcurrent": 2 }
     }
   },

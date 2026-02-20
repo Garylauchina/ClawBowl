@@ -544,6 +544,9 @@ OpenClaw 网关在工具执行期间会暂停 SSE 流（几秒到几分钟），
 而 LLM 文本生成是毫秒级连续输出。利用这个时间差来检测轮次边界，
 从而将最后一个"快速连发"段识别为最终结果。"""
 
+_IDLE_HEARTBEAT_FIRST = 30.0
+_IDLE_HEARTBEAT_INTERVAL = 15.0
+
 
 async def proxy_chat_stream(
     instance: OpenClawInstance,
@@ -588,7 +591,9 @@ async def proxy_chat_stream(
             async with httpx.AsyncClient(timeout=_REQ_TIMEOUT) as client:
                 async with client.stream("POST", url, json=body, headers=headers) as resp:
                     resp.raise_for_status()
-                    async for raw_line in resp.aiter_lines():
+                    line_iter = resp.aiter_lines().__aiter__()
+                    idle_count = 0
+                    while True:
                         # ── Check for user-initiated cancel ──
                         if cancel_event.is_set():
                             logger.info("Stream cancelled by user %s", instance.user_id)
@@ -599,6 +604,23 @@ async def proxy_chat_stream(
                             yield _make_content_chunk("\n\n[已中断]")
                             yield "data: [DONE]\n\n"
                             return
+
+                        timeout = _IDLE_HEARTBEAT_FIRST if idle_count == 0 else _IDLE_HEARTBEAT_INTERVAL
+                        try:
+                            raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=timeout)
+                            idle_count = 0
+                        except asyncio.TimeoutError:
+                            idle_count += 1
+                            if idle_count == 1:
+                                yield _make_thinking_chunk("⏳ AI 正在完成上一个任务，请稍候...\n")
+                            else:
+                                waited = int(_IDLE_HEARTBEAT_FIRST + (idle_count - 1) * _IDLE_HEARTBEAT_INTERVAL)
+                                yield _make_thinking_chunk(f"⏳ 仍在等待（已等待 {waited}秒）...\n")
+                            thinking_emitted = True
+                            continue
+                        except StopAsyncIteration:
+                            break
+
                         line = raw_line.strip()
                         if not line:
                             continue

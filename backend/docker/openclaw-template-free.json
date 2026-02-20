@@ -49,7 +49,7 @@
         "zenmux/z-ai/glm-4.6v-flash-free": {}
       },
       "workspace": "/data/workspace",
-      "maxConcurrent": 1,
+      "maxConcurrent": 2,
       "subagents": { "maxConcurrent": 2, "maxSpawnDepth": 2, "maxChildrenPerAgent": 3 }
     }
   },
