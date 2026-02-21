@@ -207,7 +207,7 @@ enum MessageStore {
             } else {
                 displayContent = p.content
             }
-            return Message(role: role, content: displayContent)
+            return Message(role: role, content: displayContent, timestamp: p.timestamp)
         }
     }
 
