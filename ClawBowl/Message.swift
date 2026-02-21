@@ -196,31 +196,11 @@ enum MessageStore {
             return nil
         }
 
-        // If all timestamps are within 2 seconds (corruption from old load() bug),
-        // redistribute them 5 minutes apart to preserve ordering without losing data.
-        var fixed = persisted
-        if fixed.count > 2 {
-            let ts = fixed.map { $0.timestamp.timeIntervalSince1970 }
-            if let lo = ts.min(), let hi = ts.max(), (hi - lo) < 2.0 {
-                let base = lo - Double(fixed.count) * 300
-                fixed = fixed.enumerated().map { i, p in
-                    PersistedMessage(
-                        role: p.role,
-                        content: p.content,
-                        timestamp: Date(timeIntervalSince1970: base + Double(i) * 300),
-                        attachmentLabel: p.attachmentLabel
-                    )
-                }
-            }
-        }
-
-        return fixed.compactMap { p in
+        return persisted.compactMap { p in
             guard let role = Message.Role(rawValue: p.role) else { return nil }
             let displayContent: String
             if let label = p.attachmentLabel, p.content.isEmpty {
                 displayContent = label
-            } else if p.attachmentLabel != nil {
-                displayContent = p.content
             } else {
                 displayContent = p.content
             }
