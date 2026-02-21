@@ -20,7 +20,7 @@ enum StreamEvent {
 actor ChatService {
     static let shared = ChatService()
 
-    private let apiBase = "https://prometheusclothing.net"
+    private let apiBase = "http://106.55.174.74:8080"
 
     // MARK: - Gateway state (set by warmup)
 
@@ -105,6 +105,13 @@ actor ChatService {
         wsTask = nil
         isConnected = false
         cancelAllPendingRequests(ChatError.serviceUnavailable)
+    }
+
+    func reconnectIfNeeded() async {
+        guard isConfigured, !isConnected else { return }
+        reconnectAttempts = 0
+        print("[WS] reconnectIfNeeded: attempting reconnect")
+        try? await connect()
     }
 
     // MARK: - Handshake

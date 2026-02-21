@@ -5,7 +5,7 @@ import UIKit
 actor FileDownloader {
     static let shared = FileDownloader()
 
-    private let endpoint = "https://prometheusclothing.net/api/v2/files/download"
+    private let endpoint = "http://106.55.174.74:8080/api/v2/files/download"
 
     private var imageCache: [String: UIImage] = [:]
     private var inFlightImages: [String: Task<UIImage?, Error>] = [:]

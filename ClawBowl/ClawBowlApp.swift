@@ -6,6 +6,7 @@ struct ClawBowlApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var authService = AuthService.shared
     @StateObject private var startup = StartupController()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -27,6 +28,13 @@ struct ClawBowlApp: App {
                 }
             }
             .animation(.easeInOut, value: authService.isAuthenticated)
+            .onChange(of: scenePhase) { phase in
+                if phase == .active {
+                    Task {
+                        await ChatService.shared.reconnectIfNeeded()
+                    }
+                }
+            }
         }
     }
 }
@@ -93,7 +101,7 @@ class StartupController: ObservableObject {
 
     private func warmup() async {
         guard let token = AuthService.shared.accessToken,
-              let url = URL(string: "https://prometheusclothing.net/api/v2/chat/warmup") else { return }
+              let url = URL(string: "http://106.55.174.74:8080/api/v2/chat/warmup") else { return }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

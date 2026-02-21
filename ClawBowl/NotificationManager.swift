@@ -71,7 +71,7 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
 
     private func registerTokenWithBackend(_ token: String) async {
         guard let authToken = await AuthService.shared.accessToken else { return }
-        guard let url = URL(string: "https://prometheusclothing.net/api/v2/notifications/register") else { return }
+        guard let url = URL(string: "http://106.55.174.74:8080/api/v2/notifications/register") else { return }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

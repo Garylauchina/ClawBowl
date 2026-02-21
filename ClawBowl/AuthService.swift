@@ -63,7 +63,7 @@ class AuthService: ObservableObject {
     @Published var isAuthenticated = false
     @Published var currentUserId: String?
 
-    private let baseURL = "https://prometheusclothing.net/api/v2/auth"
+    private let baseURL = "http://106.55.174.74:8080/api/v2/auth"
     private let tokenKey = "jwt_access_token"
     private let userIdKey = "auth_user_id"
 

@@ -59,7 +59,7 @@ struct CronJob: Identifiable {
 actor CronService {
     static let shared = CronService()
 
-    private let baseURL = "https://prometheusclothing.net/api/v2/cron"
+    private let baseURL = "http://106.55.174.74:8080/api/v2/cron"
 
     private init() {}
 
