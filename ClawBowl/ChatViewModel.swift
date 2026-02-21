@@ -28,11 +28,23 @@ final class ChatViewModel: ObservableObject {
         } else {
             messages = [Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")]
         }
+
+        Task { await loadHistoryFromGateway() }
     }
 
-    // Messages are persisted locally via MessageStore.
-    // On logout, MessageStore.clear() wipes the cache.
-    // History lives in OpenClaw session JSONL — no backend middleware needed.
+    /// Load chat history from the Gateway via WebSocket (replaces local cache)
+    private func loadHistoryFromGateway() async {
+        guard await ChatService.shared.isConfigured else { return }
+        do {
+            let history = try await ChatService.shared.loadHistory()
+            if !history.isEmpty {
+                self.messages = history
+                MessageStore.save(history)
+            }
+        } catch {
+            // Fall back to local cache (already loaded in init)
+        }
+    }
 
     // MARK: - Ready Gate
 

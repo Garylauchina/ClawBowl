@@ -58,7 +58,7 @@
     "port": 18789,
     "mode": "local",
     "bind": "loopback",
-    "controlUi": { "enabled": true },
+    "controlUi": { "enabled": true, "dangerouslyDisableDeviceAuth": true, "allowedOrigins": ["*"] },
     "auth": {
       "mode": "token",
       "token": "{{ GATEWAY_TOKEN }}"
@@ -90,10 +90,7 @@
       "globalCircuitBreakerThreshold": 30
     },
     "web": {
-      "search": {
-        "enabled": true,
-        "apiKey": "BSAHUPck1u-lRrQYy7wQxcOqJsqd5LK"
-      },
+      "search": { "enabled": false },
       "fetch": { "enabled": true }
     }
   },

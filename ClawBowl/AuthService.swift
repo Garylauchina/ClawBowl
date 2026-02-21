@@ -187,6 +187,8 @@ class AuthService: ObservableObject {
         KeychainHelper.delete(forKey: userIdKey)
         isAuthenticated = false
         currentUserId = nil
+        MessageStore.clear()
+        Task { await ChatService.shared.disconnect() }
     }
 
     // MARK: - Private

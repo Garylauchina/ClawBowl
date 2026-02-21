@@ -1,0 +1,67 @@
+# Skill: Web Search
+
+## Overview
+
+You have web search capability. Use it proactively whenever a task benefits from
+external information — not just for "real-time data", but for **any** question
+where your training data might be incomplete, outdated, or insufficient.
+
+{% if TAVILY_API_KEY %}
+## How to Search
+
+### Primary: Tavily Search API
+
+Use the `exec` tool to call Tavily:
+
+```bash
+curl -s "https://api.tavily.com/search" \
+  -H "Content-Type: application/json" \
+  -d '{"api_key":"{{ TAVILY_API_KEY }}","query":"YOUR QUERY HERE","max_results":5}'
+```
+
+The response JSON contains `results[]` with `title`, `url`, `content` fields.
+
+**Advanced options** (add to the JSON body as needed):
+- `"search_depth": "advanced"` — deeper crawl, slower but more thorough
+- `"include_answer": true` — Tavily returns a direct answer summary
+- `"include_domains": ["example.com"]` — restrict to specific sites
+- `"exclude_domains": ["example.com"]` — block specific sites
+{% else %}
+## How to Search
+
+Use the built-in `web_search` tool:
+
+```
+web_search("query here")
+```
+{% endif %}
+
+## When to Search
+
+- **Factual questions** you're not 100% confident about
+- **Current events**: news, sports scores, election results, policy changes
+- **Prices & market data**: stocks, crypto, exchange rates, product pricing
+- **Technical references**: API docs, library versions, configuration syntax
+- **People & organizations**: recent activities, announcements, bios
+- **Weather & location info**
+- **Anything the user explicitly wants verified or up-to-date**
+- **Cron/heartbeat tasks** that must deliver factual data
+
+## Rules
+
+1. **Do NOT fabricate data.** If a search returns no useful results, say so.
+   Never invent numbers, dates, URLs, or quotes.
+2. **Cite your sources.** When presenting search results, mention where the
+   information came from (site name or URL).
+3. **Prefer recent sources.** If multiple results conflict, favor the most
+   recent and most authoritative.
+4. **Search in the user's language** when the topic is region-specific
+   (e.g., Chinese news → search in Chinese).
+
+## Fallback
+
+If the search fails or returns nothing useful:
+
+1. Tell the user: "搜索未返回有效结果，以下信息基于我的训练数据，可能不够准确。"
+2. Provide your best answer with a clear caveat.
+3. Suggest the user check specific websites for authoritative info.

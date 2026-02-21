@@ -59,6 +59,7 @@ def _init_workspace(user: User, workspace_dir: Path, config_dir: Path) -> None:
         "USER_TIMEZONE": "Asia/Shanghai",
         "AGENT_NAME": "Claw",
         "CREATION_DATE": now.strftime("%Y-%m-%d"),
+        "TAVILY_API_KEY": settings.tavily_api_key or "",
     }
 
     env = Environment(
@@ -132,6 +133,10 @@ class InstanceManager:
         # Update last active timestamp
         instance.last_active_at = datetime.now(timezone.utc)
         await db.commit()
+
+        # Ensure session files are readable for history retrieval
+        await self._fix_session_permissions(Path(instance.data_path) / "config")
+
         return instance
 
     async def get_instance(self, user_id: str, db: AsyncSession) -> OpenClawInstance | None:
@@ -234,9 +239,7 @@ class InstanceManager:
         data_path = Path(settings.openclaw_data_dir) / user.id
         config_dir = data_path / "config"
         workspace_dir = data_path / "workspace"
-        snapshots_dir = data_path / "snapshots"
         workspace_dir.mkdir(parents=True, exist_ok=True)
-        snapshots_dir.mkdir(parents=True, exist_ok=True)
 
         # Write per-user openclaw.json
         write_config(user, gateway_token, config_dir)

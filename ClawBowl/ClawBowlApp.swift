@@ -115,7 +115,7 @@ class StartupController: ObservableObject {
         }
     }
 
-    /// 预热后端容器并获取 Gateway 直连信息（10 秒超时）
+    /// 预热后端容器，获取 Gateway + 设备认证信息，建立 WebSocket 连接
     private func warmupContainerQuiet() async {
         guard let token = AuthService.shared.accessToken,
               let url = URL(string: "https://prometheusclothing.net/api/v2/chat/warmup") else {
@@ -125,22 +125,29 @@ class StartupController: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 10
+        request.timeoutInterval = 15
 
-        await withTimeLimit(seconds: 10) {
+        await withTimeLimit(seconds: 15) {
             guard let (data, response) = try? await URLSession.shared.data(for: request),
                   let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let gwURL = json["gateway_url"] as? String,
                   let gwToken = json["gateway_token"] as? String,
-                  let sessKey = json["session_key"] as? String else {
+                  let sessKey = json["session_key"] as? String,
+                  let devId = json["device_id"] as? String,
+                  let devPub = json["device_public_key"] as? String,
+                  let devPriv = json["device_private_key"] as? String else {
                 return
             }
             await ChatService.shared.configure(
                 gatewayURL: gwURL,
                 gatewayToken: gwToken,
-                sessionKey: sessKey
+                sessionKey: sessKey,
+                devicePrivateKey: devPriv,
+                devicePublicKey: devPub,
+                deviceId: devId
             )
+            try? await ChatService.shared.connect()
         }
     }
 

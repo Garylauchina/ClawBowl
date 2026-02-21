@@ -167,10 +167,9 @@ enum MessageStore {
         return dir.appendingPathComponent("chat_messages.json")
     }
 
-    /// 保存消息列表（最多保留最近 200 条，更早的按需从后端分页拉取）
+    /// 保存消息列表（全量缓存，下次启动时作为离线备份）
     static func save(_ messages: [Message]) {
-        let recent = messages.suffix(200)
-        let persisted = recent.map { msg -> PersistedMessage in
+        let persisted = messages.map { msg -> PersistedMessage in
             var label: String? = nil
             if let att = msg.attachment {
                 label = att.isImage ? "[图片]" : "[文件: \(att.filename)]"

@@ -1,45 +1,321 @@
 import Foundation
+import CryptoKit
 import UIKit
 
-/// SSE 流式事件类型
+/// WebSocket 事件类型（从 Gateway 接收）
 enum StreamEvent {
     /// 工具执行状态（浅色字体显示）
     case thinking(String)
     /// 正常文本内容增量
     case content(String)
-    /// 内容被安全审核过滤（0-chunk 空响应）
+    /// 内容被安全审核过滤
     case filtered(String)
-    /// Agent 生成的文件（workspace diff 检测）
+    /// Agent 生成的文件
     case file(FileInfo)
     /// 流结束
     case done
 }
 
-/// AI 聊天 API 通信服务 – 直连 OpenClaw Gateway（经 nginx 反代）
+/// AI 聊天服务 – 通过 WebSocket 直连 OpenClaw Gateway
 actor ChatService {
     static let shared = ChatService()
 
     private let apiBase = "https://prometheusclothing.net"
 
-    // MARK: - Gateway direct-connect state (set by warmup)
+    // MARK: - Gateway state (set by warmup)
 
     private var gatewayPath: String?
     private var gatewayToken: String?
     private var sessionKey: String?
+    private var devicePrivateKeyRaw: Data?
+    private var devicePublicKeyB64: String?
+    private var deviceId: String?
 
-    /// Whether gateway info has been configured via warmup
+    // MARK: - WebSocket state
+
+    private var wsTask: URLSessionWebSocketTask?
+    private var receiveLoop: Task<Void, Never>?
+    private var requestCallbacks: [String: CheckedContinuation<[String: Any], Error>] = [:]
+    private var chatEventHandler: (([String: Any]) -> Void)?
+    private var agentEventHandler: (([String: Any]) -> Void)?
+    private var isConnected = false
+    private var reconnectAttempts = 0
+    private let maxReconnectAttempts = 5
+
     var isConfigured: Bool { gatewayPath != nil }
 
     private init() {}
 
-    /// Called after warmup to store gateway connection details.
-    func configure(gatewayURL: String, gatewayToken: String, sessionKey: String) {
+    // MARK: - Configure
+
+    func configure(
+        gatewayURL: String,
+        gatewayToken: String,
+        sessionKey: String,
+        devicePrivateKey: String,
+        devicePublicKey: String,
+        deviceId: String
+    ) {
         self.gatewayPath = gatewayURL
         self.gatewayToken = gatewayToken
         self.sessionKey = sessionKey
+        self.devicePrivateKeyRaw = Data(base64URLDecoded: devicePrivateKey)
+        self.devicePublicKeyB64 = devicePublicKey
+        self.deviceId = deviceId
     }
 
-    // MARK: - Tool status map (client-side thinking display)
+    // MARK: - WebSocket Connection
+
+    func connect() async throws {
+        guard let gwPath = gatewayPath else {
+            throw ChatError.serviceUnavailable
+        }
+
+        let wsURL = URL(string: "\(apiBase)\(gwPath)/")!
+        var request = URLRequest(url: wsURL)
+        request.timeoutInterval = 30
+
+        let session = URLSession(configuration: .default)
+        let task = session.webSocketTask(with: request)
+        self.wsTask = task
+        task.resume()
+
+        try await performHandshake(task)
+        isConnected = true
+        reconnectAttempts = 0
+
+        startReceiveLoop()
+    }
+
+    func disconnect() {
+        receiveLoop?.cancel()
+        receiveLoop = nil
+        wsTask?.cancel(with: .goingAway, reason: nil)
+        wsTask = nil
+        isConnected = false
+        cancelAllPendingRequests(ChatError.serviceUnavailable)
+    }
+
+    // MARK: - Handshake
+
+    private func performHandshake(_ task: URLSessionWebSocketTask) async throws {
+        let challengeMsg = try await task.receive()
+        guard case .string(let challengeStr) = challengeMsg,
+              let challengeData = challengeStr.data(using: .utf8),
+              let challenge = try? JSONSerialization.jsonObject(with: challengeData) as? [String: Any],
+              let payload = challenge["payload"] as? [String: Any],
+              let nonce = payload["nonce"] as? String else {
+            throw ChatError.invalidResponse
+        }
+
+        guard let gwToken = gatewayToken,
+              let privKeyData = devicePrivateKeyRaw,
+              let pubKeyB64 = devicePublicKeyB64,
+              let devId = deviceId else {
+            throw ChatError.notAuthenticated
+        }
+
+        let signedAtMs = Int(Date().timeIntervalSince1970 * 1000)
+        let scopes = ["operator.read", "operator.write"]
+        let signPayload = [
+            "v2", devId, "openclaw-ios", "cli", "operator",
+            scopes.joined(separator: ","),
+            String(signedAtMs), gwToken, nonce
+        ].joined(separator: "|")
+
+        let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: privKeyData)
+        let signature = try privateKey.signature(for: Data(signPayload.utf8))
+        let sigB64 = signature.rawRepresentation.base64URLEncodedString()
+
+        let connectParams: [String: Any] = [
+            "type": "req",
+            "id": "connect",
+            "method": "connect",
+            "params": [
+                "minProtocol": 3,
+                "maxProtocol": 3,
+                "client": [
+                    "id": "openclaw-ios",
+                    "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0",
+                    "platform": "ios",
+                    "mode": "cli"
+                ],
+                "role": "operator",
+                "scopes": scopes,
+                "auth": ["token": gwToken],
+                "device": [
+                    "id": devId,
+                    "publicKey": pubKeyB64,
+                    "signature": sigB64,
+                    "signedAt": signedAtMs,
+                    "nonce": nonce
+                ]
+            ] as [String: Any]
+        ]
+
+        let connectData = try JSONSerialization.data(withJSONObject: connectParams)
+        try await task.send(.string(String(data: connectData, encoding: .utf8)!))
+
+        let helloMsg = try await task.receive()
+        guard case .string(let helloStr) = helloMsg,
+              let helloData = helloStr.data(using: .utf8),
+              let hello = try? JSONSerialization.jsonObject(with: helloData) as? [String: Any],
+              hello["ok"] as? Bool == true else {
+            throw ChatError.invalidResponse
+        }
+    }
+
+    // MARK: - Receive Loop
+
+    private func startReceiveLoop() {
+        receiveLoop = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do {
+                    guard let task = await self.wsTask else { break }
+                    let message = try await task.receive()
+                    guard case .string(let text) = message,
+                          let data = text.data(using: .utf8),
+                          let frame = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        continue
+                    }
+                    await self.handleFrame(frame)
+                } catch {
+                    if !Task.isCancelled {
+                        await self.handleDisconnect()
+                    }
+                    break
+                }
+            }
+        }
+    }
+
+    private func handleFrame(_ frame: [String: Any]) {
+        let type = frame["type"] as? String ?? ""
+
+        switch type {
+        case "res":
+            if let id = frame["id"] as? String, let cont = requestCallbacks.removeValue(forKey: id) {
+                if frame["ok"] as? Bool == true {
+                    cont.resume(returning: frame["payload"] as? [String: Any] ?? [:])
+                } else {
+                    let errMsg = (frame["error"] as? [String: Any])?["message"] as? String ?? "Request failed"
+                    cont.resume(throwing: ChatError.serverError)
+                    _ = errMsg
+                }
+            }
+        case "event":
+            let event = frame["event"] as? String ?? ""
+            let payload = frame["payload"] as? [String: Any] ?? [:]
+            if event == "chat" || event.hasPrefix("chat.") {
+                chatEventHandler?(payload)
+            } else if event == "agent" || event.hasPrefix("agent.") {
+                agentEventHandler?(payload)
+            }
+        default:
+            break
+        }
+    }
+
+    private func handleDisconnect() {
+        isConnected = false
+        cancelAllPendingRequests(ChatError.serviceUnavailable)
+
+        guard reconnectAttempts < maxReconnectAttempts else { return }
+        reconnectAttempts += 1
+        let delay = min(pow(2.0, Double(reconnectAttempts)), 30.0)
+
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, !isConnected else { return }
+            try? await connect()
+        }
+    }
+
+    private func cancelAllPendingRequests(_ error: Error) {
+        for (_, cont) in requestCallbacks {
+            cont.resume(throwing: error)
+        }
+        requestCallbacks.removeAll()
+    }
+
+    // MARK: - Send Request
+
+    private func sendRequest(method: String, params: [String: Any]) async throws -> [String: Any] {
+        guard let task = wsTask, isConnected else {
+            throw ChatError.serviceUnavailable
+        }
+
+        let id = UUID().uuidString
+        let frame: [String: Any] = [
+            "type": "req",
+            "id": id,
+            "method": method,
+            "params": params
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: frame)
+        try await task.send(.string(String(data: data, encoding: .utf8)!))
+
+        return try await withCheckedThrowingContinuation { continuation in
+            self.requestCallbacks[id] = continuation
+
+            Task {
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                if let cont = self.requestCallbacks.removeValue(forKey: id) {
+                    cont.resume(throwing: ChatError.serverError)
+                }
+            }
+        }
+    }
+
+    // MARK: - Chat History
+
+    func loadHistory() async throws -> [Message] {
+        guard let sk = sessionKey else {
+            throw ChatError.serviceUnavailable
+        }
+
+        let result = try await sendRequest(method: "chat.history", params: [
+            "sessionKey": sk
+        ])
+
+        guard let messages = result["messages"] as? [[String: Any]] else {
+            return []
+        }
+
+        return messages.compactMap { msg -> Message? in
+            guard let role = msg["role"] as? String,
+                  let messageRole = Message.Role(rawValue: role) else { return nil }
+
+            let content: String
+            if let contentArray = msg["content"] as? [[String: Any]] {
+                content = contentArray.compactMap { part -> String? in
+                    guard part["type"] as? String == "text" else { return nil }
+                    return part["text"] as? String
+                }.joined()
+            } else if let contentStr = msg["content"] as? String {
+                content = contentStr
+            } else {
+                return nil
+            }
+
+            guard !content.isEmpty else { return nil }
+
+            let timestamp: Date
+            if let ts = msg["timestamp"] as? Double {
+                timestamp = Date(timeIntervalSince1970: ts / 1000.0)
+            } else if let ts = msg["timestamp"] as? Int {
+                timestamp = Date(timeIntervalSince1970: Double(ts) / 1000.0)
+            } else {
+                timestamp = Date()
+            }
+
+            return Message(role: messageRole, content: content, timestamp: timestamp)
+        }
+    }
+
+    // MARK: - Send Message (Streaming via WebSocket Events)
 
     private static let toolStatusMap: [String: String] = [
         "image": "正在分析图片...",
@@ -54,67 +330,140 @@ actor ChatService {
         "memory": "正在检索记忆...",
     ]
 
-    // MARK: - Build request messages
-
-    /// 构建请求消息列表
-    /// 图片附件 ≤10MB → base64 嵌入 content 数组（OpenClaw 原生方式）
-    /// 大文件 → 先上传到 workspace，消息中引用路径
-    private func buildRequestMessages(
-        content: String,
-        uploadedFilePath: String?,
-        attachment: Attachment?,
+    func sendMessageStream(
+        _ content: String,
+        attachment: Attachment? = nil,
         history: [Message]
-    ) -> [[String: Any]] {
-        var requestMessages: [[String: Any]] = []
+    ) async throws -> AsyncThrowingStream<StreamEvent, Error> {
+        guard let sk = sessionKey, isConnected else {
+            throw ChatError.serviceUnavailable
+        }
 
-        let recentHistory = Array(history.suffix(20))
-        var indicesToSkip = Set<Int>()
-        for i in (0..<recentHistory.count).reversed() {
-            let msg = recentHistory[i]
-            if msg.role == .assistant && (msg.status == .error || msg.status == .filtered) {
-                indicesToSkip.insert(i)
-                if i > 0 && recentHistory[i - 1].role == .user {
-                    indicesToSkip.insert(i - 1)
+        var uploadedPath: String?
+        if let att = attachment, !att.isImage || att.data.count > 10 * 1024 * 1024 {
+            uploadedPath = try await uploadAttachment(att)
+        }
+
+        var messageText = content
+        if let att = attachment, att.isImage, att.data.count <= 10 * 1024 * 1024 {
+            let b64 = att.data.base64EncodedString()
+            messageText = content.isEmpty ? "请分析这张图片\n\n[image:data:\(att.mimeType);base64,\(b64)]" : "\(content)\n\n[image:data:\(att.mimeType);base64,\(b64)]"
+        } else if let path = uploadedPath {
+            messageText = "[用户发送了文件: \(path)]" + (content.isEmpty ? "" : "\n\n\(content)")
+        }
+
+        let idempotencyKey = UUID().uuidString
+
+        return AsyncThrowingStream { continuation in
+            let sendTask = Task { [weak self] in
+                guard let self else { return }
+
+                var seenTools = Set<String>()
+                var thinkingEmitted = false
+                var finalReceived = false
+                var contentBuffer = ""
+
+                await self.setChatEventHandler { payload in
+                    let state = payload["state"] as? String ?? ""
+                    let message = payload["message"] as? [String: Any] ?? [:]
+
+                    if state == "delta" || state == "final" {
+                        let msgContent = message["content"]
+                        var text = ""
+                        if let arr = msgContent as? [[String: Any]] {
+                            text = arr.compactMap { p -> String? in
+                                guard p["type"] as? String == "text" else { return nil }
+                                return p["text"] as? String
+                            }.joined()
+                        } else if let s = msgContent as? String {
+                            text = s
+                        }
+
+                        if state == "final" {
+                            if !text.isEmpty {
+                                continuation.yield(.content(text))
+                            }
+                            continuation.yield(.done)
+                            continuation.finish()
+                            finalReceived = true
+                        }
+                    }
+                }
+
+                await self.setAgentEventHandler { payload in
+                    let stream = payload["stream"] as? String ?? ""
+                    let data = payload["data"] as? [String: Any] ?? [:]
+
+                    switch stream {
+                    case "assistant":
+                        if let delta = data["delta"] as? String, !delta.isEmpty {
+                            contentBuffer += delta
+                            continuation.yield(.thinking(delta))
+                            thinkingEmitted = true
+                        }
+                    case "tool":
+                        if let name = data["name"] as? String, !name.isEmpty, !seenTools.contains(name) {
+                            seenTools.insert(name)
+                            let status = Self.toolStatusMap[name] ?? "正在执行 \(name)..."
+                            let prefix = thinkingEmitted ? "\n" : ""
+                            continuation.yield(.thinking(prefix + status + "\n"))
+                            thinkingEmitted = true
+                        }
+                    case "lifecycle":
+                        let phase = data["phase"] as? String ?? ""
+                        if phase == "end" && !finalReceived {
+                            // lifecycle end without chat.final — use buffered content
+                            let final = contentBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !final.isEmpty {
+                                continuation.yield(.content(final))
+                            }
+                            continuation.yield(.done)
+                            continuation.finish()
+                        }
+                    default:
+                        break
+                    }
+                }
+
+                do {
+                    let _ = try await self.sendRequest(method: "chat.send", params: [
+                        "sessionKey": sk,
+                        "message": messageText,
+                        "deliver": true,
+                        "idempotencyKey": idempotencyKey
+                    ])
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { _ in
+                sendTask.cancel()
+                Task { [weak self] in
+                    await self?.setChatEventHandler(nil)
+                    await self?.setAgentEventHandler(nil)
                 }
             }
         }
-        for (i, msg) in recentHistory.enumerated() {
-            if indicesToSkip.contains(i) { continue }
-            requestMessages.append(["role": msg.role.rawValue, "content": msg.content])
-        }
-
-        // Current message
-        if let att = attachment, att.isImage, att.data.count <= 10 * 1024 * 1024 {
-            // OpenClaw native: embed base64 image in content array
-            let b64 = att.data.base64EncodedString()
-            let dataUrl = "data:\(att.mimeType);base64,\(b64)"
-            var parts: [[String: Any]] = [
-                ["type": "image_url", "image_url": ["url": dataUrl]]
-            ]
-            let text = content.isEmpty ? "请分析这张图片" : content
-            parts.insert(["type": "text", "text": text], at: 0)
-            requestMessages.append(["role": "user", "content": parts])
-        } else {
-            var messageText = ""
-            if let path = uploadedFilePath {
-                messageText += "[用户发送了文件: \(path)]"
-            }
-            if !content.isEmpty {
-                if !messageText.isEmpty { messageText += "\n\n" }
-                messageText += content
-            }
-            if messageText.isEmpty, let att = attachment {
-                messageText = att.isImage ? "[图片]" : "[文件: \(att.filename)]"
-            }
-            requestMessages.append(["role": "user", "content": messageText])
-        }
-
-        return requestMessages
     }
 
-    // MARK: - Upload attachment
+    private func setChatEventHandler(_ handler: (([String: Any]) -> Void)?) {
+        chatEventHandler = handler
+    }
 
-    /// 上传附件到后端 workspace，返回 workspace 相对路径
+    private func setAgentEventHandler(_ handler: (([String: Any]) -> Void)?) {
+        agentEventHandler = handler
+    }
+
+    // MARK: - Cancel Chat
+
+    func cancelChat() async {
+        guard let sk = sessionKey, isConnected else { return }
+        _ = try? await sendRequest(method: "chat.abort", params: ["sessionKey": sk])
+    }
+
+    // MARK: - Upload Attachment (HTTP)
+
     private func uploadAttachment(_ attachment: Attachment) async throws -> String {
         guard let token = await AuthService.shared.accessToken else {
             throw ChatError.notAuthenticated
@@ -148,184 +497,29 @@ actor ChatService {
         return path
     }
 
-    // MARK: - Streaming (SSE) — direct gateway connection
+    // MARK: - Session Management
 
-    /// 发送消息并以 SSE 流式接收 AI 回复（直连 OpenClaw Gateway）
-    ///
-    /// 客户端实现轮次检测：
-    /// - tool_calls → 以 thinking 形式显示工具状态
-    /// - finish_reason="tool_calls" → 当前内容作为 thinking，开始新轮次
-    /// - finish_reason="stop" → 当前内容作为 content（最终回答）
-    func sendMessageStream(
-        _ content: String,
-        attachment: Attachment? = nil,
-        history: [Message]
-    ) async throws -> AsyncThrowingStream<StreamEvent, Error> {
-        guard let gwPath = gatewayPath, let gwToken = gatewayToken else {
-            throw ChatError.serviceUnavailable
-        }
-
-        // Only upload non-image or large files; images ≤10MB are base64-embedded
-        var uploadedPath: String?
-        if let att = attachment, !att.isImage || att.data.count > 10 * 1024 * 1024 {
-            uploadedPath = try await uploadAttachment(att)
-        }
-
-        let messages = buildRequestMessages(
-            content: content,
-            uploadedFilePath: uploadedPath,
-            attachment: attachment,
-            history: history
-        )
-
-        guard let url = URL(string: "\(apiBase)\(gwPath)/v1/chat/completions") else {
-            throw ChatError.invalidURL
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(gwToken)", forHTTPHeaderField: "Authorization")
-        if let sk = sessionKey {
-            request.setValue(sk, forHTTPHeaderField: "x-openclaw-session-key")
-        }
-        request.timeoutInterval = 300
-
-        let hasImage = attachment?.isImage == true && (attachment?.data.count ?? 0) <= 10 * 1024 * 1024
-        let model = hasImage ? "zenmux/z-ai/glm-4.6v-flash-free" : "zenmux/deepseek/deepseek-chat"
-        let body: [String: Any] = [
-            "model": model,
-            "messages": messages,
-            "stream": true,
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        try validateHTTPResponse(response)
-
-        return AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    var contentBuffer: [String] = []
-                    var seenTools = Set<String>()
-                    var thinkingEmitted = false
-
-                    for try await line in bytes.lines {
-                        guard line.hasPrefix("data: ") else { continue }
-                        let payload = String(line.dropFirst(6))
-
-                        if payload == "[DONE]" {
-                            // Flush remaining buffer as content
-                            let final = contentBuffer.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !final.isEmpty {
-                                continuation.yield(.content(final))
-                            }
-                            continuation.yield(.done)
-                            continuation.finish()
-                            return
-                        }
-
-                        guard let data = payload.data(using: .utf8),
-                              let chunk = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                              let choices = chunk["choices"] as? [[String: Any]],
-                              let choice = choices.first else { continue }
-
-                        let delta = choice["delta"] as? [String: Any] ?? [:]
-                        let finishReason = choice["finish_reason"] as? String
-
-                        // Tool calls → emit thinking status
-                        if let toolCalls = delta["tool_calls"] as? [[String: Any]] {
-                            for tc in toolCalls {
-                                if let fn = tc["function"] as? [String: Any],
-                                   let name = fn["name"] as? String, !name.isEmpty,
-                                   !seenTools.contains(name) {
-                                    seenTools.insert(name)
-                                    let status = Self.toolStatusMap[name] ?? "正在执行 \(name)..."
-                                    let prefix = thinkingEmitted ? "\n" : ""
-                                    continuation.yield(.thinking(prefix + status + "\n"))
-                                    thinkingEmitted = true
-                                }
-                            }
-                        }
-
-                        // Content text → buffer
-                        if let text = delta["content"] as? String, !text.isEmpty {
-                            contentBuffer.append(text)
-                            // Stream as thinking for real-time feedback
-                            continuation.yield(.thinking(text))
-                            thinkingEmitted = true
-                        }
-
-                        // Turn boundary: tool_calls → flush buffer as thinking, reset
-                        if finishReason == "tool_calls" {
-                            contentBuffer.removeAll()
-                            if thinkingEmitted {
-                                continuation.yield(.thinking("\n\n"))
-                            }
-                        }
-
-                        // Final answer: stop → emit buffer as content
-                        if finishReason == "stop" {
-                            let final = contentBuffer.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !final.isEmpty {
-                                continuation.yield(.content(final))
-                            }
-                            contentBuffer.removeAll()
-                        }
-                    }
-                    // Stream ended without [DONE]
-                    let final = contentBuffer.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !final.isEmpty {
-                        continuation.yield(.content(final))
-                    }
-                    continuation.yield(.done)
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-
-            continuation.onTermination = { _ in
-                task.cancel()
-            }
-        }
-    }
-
-    // MARK: - Stream cancellation
-
-    /// 取消当前活跃的流 — 直连模式下只需取消客户端 URLSession 即可
-    func cancelChat() async {
-        // With direct connect, cancelling the Task (which cancels URLSession)
-        // is sufficient. No backend endpoint needed.
-    }
-
-    // History is handled by local MessageStore persistence.
-    // On logout MessageStore.clear() wipes the cache, new session starts fresh.
-
-    // MARK: - Session management
-
-    /// 重置会话（请求后端销毁并重建 OpenClaw 实例）
     func resetSession() async {
-        guard let token = await AuthService.shared.accessToken else { return }
+        disconnect()
 
-        guard let url = URL(string: "\(apiBase)/api/v2/instance/clear") else {
-            return
-        }
+        guard let token = await AuthService.shared.accessToken else { return }
+        guard let url = URL(string: "\(apiBase)/api/v2/instance/clear") else { return }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 30
-
         _ = try? await URLSession.shared.data(for: request)
 
-        // Clear gateway config — will be re-configured on next warmup
         gatewayPath = nil
         gatewayToken = nil
         sessionKey = nil
+        devicePrivateKeyRaw = nil
+        devicePublicKeyB64 = nil
+        deviceId = nil
     }
 
-    // MARK: - HTTP validation
+    // MARK: - HTTP Validation
 
     private func validateHTTPResponse(_ response: URLResponse) throws {
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -336,20 +530,38 @@ actor ChatService {
             case 401:
                 Task { try? await AuthService.shared.refreshToken() }
                 throw ChatError.notAuthenticated
-            case 429:
-                throw ChatError.rateLimited
-            case 500:
-                throw ChatError.serverError
-            case 502, 503:
-                throw ChatError.serviceUnavailable
-            default:
-                throw ChatError.httpError(httpResponse.statusCode)
+            case 429: throw ChatError.rateLimited
+            case 500: throw ChatError.serverError
+            case 502, 503: throw ChatError.serviceUnavailable
+            default: throw ChatError.httpError(httpResponse.statusCode)
             }
         }
     }
 }
 
-/// 聊天错误类型
+// MARK: - Base64URL Helpers
+
+extension Data {
+    init?(base64URLDecoded string: String) {
+        var base64 = string
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while base64.count % 4 != 0 {
+            base64.append("=")
+        }
+        self.init(base64Encoded: base64)
+    }
+
+    func base64URLEncodedString() -> String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+// MARK: - Chat Errors
+
 enum ChatError: LocalizedError {
     case invalidURL
     case invalidResponse
@@ -363,24 +575,15 @@ enum ChatError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL:
-            return "无效的请求地址"
-        case .invalidResponse:
-            return "服务器响应异常"
-        case .emptyResponse:
-            return "AI 未返回内容"
-        case .rateLimited:
-            return "请求过于频繁，请稍后再试"
-        case .serverError:
-            return "服务器内部错误"
-        case .serviceUnavailable:
-            return "AI 服务正在启动，请稍后重试"
-        case .notAuthenticated:
-            return "请先登录"
-        case .uploadFailed:
-            return "附件上传失败，请重试"
-        case .httpError(let code):
-            return "请求失败 (\(code))"
+        case .invalidURL: return "无效的请求地址"
+        case .invalidResponse: return "服务器响应异常"
+        case .emptyResponse: return "AI 未返回内容"
+        case .rateLimited: return "请求过于频繁，请稍后再试"
+        case .serverError: return "服务器内部错误"
+        case .serviceUnavailable: return "AI 服务正在启动，请稍后重试"
+        case .notAuthenticated: return "请先登录"
+        case .uploadFailed: return "附件上传失败，请重试"
+        case .httpError(let code): return "请求失败 (\(code))"
         }
     }
 }
