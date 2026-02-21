@@ -22,6 +22,8 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Lifecycle
 
+    private var readyObserver: Any?
+
     init() {
         if let saved = MessageStore.load(), !saved.isEmpty {
             messages = saved
@@ -30,6 +32,17 @@ final class ChatViewModel: ObservableObject {
         }
 
         Task { await loadHistoryFromGateway() }
+
+        readyObserver = NotificationCenter.default.addObserver(
+            forName: .chatServiceReady, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in await self.loadHistoryFromGateway() }
+        }
+    }
+
+    deinit {
+        if let obs = readyObserver { NotificationCenter.default.removeObserver(obs) }
     }
 
     /// Load chat history from the Gateway via WebSocket (replaces local cache)

@@ -20,6 +20,7 @@ struct ClawBowlApp: App {
                         .environmentObject(authService)
                         .onAppear {
                             NotificationManager.shared.requestPermission()
+                            startup.ensureWarmup()
                         }
                 } else {
                     AuthView(authService: authService)
@@ -112,6 +113,19 @@ class StartupController: ObservableObject {
     private func refreshTokenQuiet() async {
         await withTimeLimit(seconds: 2) {
             try? await AuthService.shared.refreshToken()
+        }
+    }
+
+    /// ChatView 出现时调用——若 ChatService 尚未配置，补发 warmup 并通知
+    func ensureWarmup() {
+        Task {
+            let configured = await ChatService.shared.isConfigured
+            guard !configured else { return }
+            await warmupContainerQuiet()
+            let nowConfigured = await ChatService.shared.isConfigured
+            if nowConfigured {
+                NotificationCenter.default.post(name: .chatServiceReady, object: nil)
+            }
         }
     }
 
@@ -248,5 +262,11 @@ struct SplashView: View {
             }
         }
     }
+}
+
+// MARK: - Notifications
+
+extension Notification.Name {
+    static let chatServiceReady = Notification.Name("chatServiceReady")
 }
 
