@@ -56,7 +56,9 @@ actor ChatService {
 
     // MARK: - Build request messages
 
-    /// 构建请求消息列表 — 历史消息用文本标记，当前消息含附件引用
+    /// 构建请求消息列表
+    /// 图片附件 ≤10MB → base64 嵌入 content 数组（OpenClaw 原生方式）
+    /// 大文件 → 先上传到 workspace，消息中引用路径
     private func buildRequestMessages(
         content: String,
         uploadedFilePath: String?,
@@ -78,28 +80,34 @@ actor ChatService {
         }
         for (i, msg) in recentHistory.enumerated() {
             if indicesToSkip.contains(i) { continue }
-            if let att = msg.attachment {
-                let label = att.isImage ? "[图片]" : "[文件: \(att.filename)]"
-                let text = msg.content.isEmpty ? label : "\(msg.content)\n\(label)"
-                requestMessages.append(["role": msg.role.rawValue, "content": text])
-            } else {
-                requestMessages.append(["role": msg.role.rawValue, "content": msg.content])
-            }
+            requestMessages.append(["role": msg.role.rawValue, "content": msg.content])
         }
 
-        // Current message — reference uploaded file path instead of embedding base64
-        var messageText = ""
-        if let path = uploadedFilePath {
-            messageText += "[用户发送了文件: \(path)]"
+        // Current message
+        if let att = attachment, att.isImage, att.data.count <= 10 * 1024 * 1024 {
+            // OpenClaw native: embed base64 image in content array
+            let b64 = att.data.base64EncodedString()
+            let dataUrl = "data:\(att.mimeType);base64,\(b64)"
+            var parts: [[String: Any]] = [
+                ["type": "image_url", "image_url": ["url": dataUrl]]
+            ]
+            let text = content.isEmpty ? "请分析这张图片" : content
+            parts.insert(["type": "text", "text": text], at: 0)
+            requestMessages.append(["role": "user", "content": parts])
+        } else {
+            var messageText = ""
+            if let path = uploadedFilePath {
+                messageText += "[用户发送了文件: \(path)]"
+            }
+            if !content.isEmpty {
+                if !messageText.isEmpty { messageText += "\n\n" }
+                messageText += content
+            }
+            if messageText.isEmpty, let att = attachment {
+                messageText = att.isImage ? "[图片]" : "[文件: \(att.filename)]"
+            }
+            requestMessages.append(["role": "user", "content": messageText])
         }
-        if !content.isEmpty {
-            if !messageText.isEmpty { messageText += "\n\n" }
-            messageText += content
-        }
-        if messageText.isEmpty, let att = attachment {
-            messageText = att.isImage ? "[图片]" : "[文件: \(att.filename)]"
-        }
-        requestMessages.append(["role": "user", "content": messageText])
 
         return requestMessages
     }
@@ -157,9 +165,9 @@ actor ChatService {
             throw ChatError.serviceUnavailable
         }
 
-        // Upload attachment first if present
+        // Only upload non-image or large files; images ≤10MB are base64-embedded
         var uploadedPath: String?
-        if let att = attachment {
+        if let att = attachment, !att.isImage || att.data.count > 10 * 1024 * 1024 {
             uploadedPath = try await uploadAttachment(att)
         }
 
@@ -183,8 +191,10 @@ actor ChatService {
         }
         request.timeoutInterval = 300
 
+        let hasImage = attachment?.isImage == true && (attachment?.data.count ?? 0) <= 10 * 1024 * 1024
+        let model = hasImage ? "zenmux/z-ai/glm-4.6v-flash-free" : "zenmux/deepseek/deepseek-chat"
         let body: [String: Any] = [
-            "model": "zenmux/deepseek/deepseek-chat",
+            "model": model,
             "messages": messages,
             "stream": true,
         ]
