@@ -47,15 +47,18 @@ final class ChatViewModel: ObservableObject {
 
     /// Load chat history from the Gateway via WebSocket (replaces local cache)
     private func loadHistoryFromGateway() async {
-        guard await ChatService.shared.isConfigured else { return }
+        let configured = await ChatService.shared.isConfigured
+        print("[History] loadHistoryFromGateway: configured=\(configured)")
+        guard configured else { return }
         do {
             let history = try await ChatService.shared.loadHistory()
+            print("[History] Loaded \(history.count) messages from gateway")
             if !history.isEmpty {
                 self.messages = history
                 MessageStore.save(history)
             }
         } catch {
-            // Fall back to local cache (already loaded in init)
+            print("[History] loadHistory failed: \(error)")
         }
     }
 

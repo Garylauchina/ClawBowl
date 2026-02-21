@@ -254,10 +254,12 @@ actor ChatService {
 
     private func sendRequest(method: String, params: [String: Any]) async throws -> [String: Any] {
         guard let task = wsTask, isConnected else {
+            print("[WS] sendRequest(\(method)): wsTask=\(wsTask != nil) isConnected=\(isConnected) - BLOCKED")
             throw ChatError.serviceUnavailable
         }
 
         let id = UUID().uuidString
+        print("[WS] sendRequest(\(method)): id=\(id)")
         let frame: [String: Any] = [
             "type": "req",
             "id": id,
@@ -284,16 +286,21 @@ actor ChatService {
 
     func loadHistory() async throws -> [Message] {
         guard let sk = sessionKey else {
+            print("[History] loadHistory: no sessionKey")
             throw ChatError.serviceUnavailable
         }
 
+        print("[History] loadHistory: sessionKey=\(sk) isConnected=\(isConnected) wsTask=\(wsTask != nil)")
         let result = try await sendRequest(method: "chat.history", params: [
             "sessionKey": sk
         ])
+        print("[History] loadHistory result keys: \(Array(result.keys))")
 
         guard let messages = result["messages"] as? [[String: Any]] else {
+            print("[History] loadHistory: no 'messages' in result, result=\(result)")
             return []
         }
+        print("[History] loadHistory: raw messages count=\(messages.count)")
 
         return messages.compactMap { msg -> Message? in
             guard let role = msg["role"] as? String,
