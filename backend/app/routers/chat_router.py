@@ -31,7 +31,7 @@ router = APIRouter(prefix="/api/v2", tags=["chat"])
 
 # ── Endpoints ────────────────────────────────────────────────────────
 
-@router.get("/chat/warmup")
+@router.post("/chat/warmup")
 async def warmup(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
