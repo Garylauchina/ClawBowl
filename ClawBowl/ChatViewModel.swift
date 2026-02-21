@@ -32,20 +32,20 @@ final class ChatViewModel: ObservableObject {
             messages = [Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")]
         }
 
-        Task { await loadHistoryFromGateway() }
+        Task { await loadHistoryViaHTTP() }
 
         readyObserver = NotificationCenter.default.addObserver(
             forName: .chatServiceReady, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            Task { @MainActor in await self.loadHistoryFromGateway() }
+            Task { @MainActor in await self.loadHistoryViaHTTP() }
         }
 
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            Task { @MainActor in await self.loadHistoryFromGateway() }
+            Task { @MainActor in await self.loadHistoryViaHTTP() }
         }
     }
 
@@ -54,20 +54,50 @@ final class ChatViewModel: ObservableObject {
         if let obs = foregroundObserver { NotificationCenter.default.removeObserver(obs) }
     }
 
-    /// Load chat history from the Gateway via WebSocket (replaces local cache)
-    private func loadHistoryFromGateway() async {
-        let configured = await ChatService.shared.isConfigured
-        print("[History] loadHistoryFromGateway: configured=\(configured)")
-        guard configured else { return }
+    private static let historyURL = "http://106.55.174.74:8080/api/v2/chat/history"
+
+    /// Load chat history via HTTP POST from backend (reads JSONL directly, no WebSocket needed)
+    private func loadHistoryViaHTTP() async {
+        guard let token = AuthService.shared.accessToken,
+              let url = URL(string: Self.historyURL) else {
+            print("[History] no token or bad URL")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+
         do {
-            let history = try await ChatService.shared.loadHistory()
-            print("[History] Loaded \(history.count) messages from gateway")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+            print("[History] HTTP \(statusCode), bytes=\(data.count)")
+            guard statusCode == 200 else { return }
+
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rawMessages = json["messages"] as? [[String: Any]] else {
+                print("[History] bad JSON structure")
+                return
+            }
+
+            let history: [Message] = rawMessages.compactMap { dict in
+                guard let roleStr = dict["role"] as? String,
+                      let content = dict["content"] as? String,
+                      !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                let role: Message.Role = roleStr == "user" ? .user : .assistant
+                return Message(role: role, content: content)
+            }
+
+            print("[History] parsed \(history.count) messages from HTTP")
             if !history.isEmpty {
                 self.messages = history
                 MessageStore.save(history)
             }
         } catch {
-            print("[History] loadHistory failed: \(error)")
+            print("[History] HTTP loadHistory failed: \(error)")
         }
     }
 

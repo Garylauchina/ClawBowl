@@ -156,3 +156,80 @@ async def warmup(
         "device_public_key": device["public_key_b64"],
         "device_private_key": device["private_key_b64"],
     }
+
+
+@router.post("/chat/history")
+async def chat_history(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Read chat history directly from OpenClaw session JSONL files."""
+    instance = await instance_manager.ensure_running(user, db)
+    session_key = f"clawbowl-{user.id}"
+    sessions_dir = Path(instance.data_path) / "config" / "agents" / "main" / "sessions"
+    sessions_json = sessions_dir / "sessions.json"
+
+    if not sessions_json.exists():
+        return {"messages": []}
+
+    try:
+        sessions_data = json.loads(sessions_json.read_text())
+    except Exception:
+        return {"messages": []}
+
+    session_info = sessions_data.get(session_key, {})
+    session_id = session_info.get("sessionId")
+    if not session_id:
+        return {"messages": []}
+
+    jsonl_path = sessions_dir / f"{session_id}.jsonl"
+    if not jsonl_path.exists():
+        return {"messages": []}
+
+    messages = []
+    try:
+        with open(jsonl_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if entry.get("type") != "message":
+                    continue
+
+                msg = entry.get("message", {})
+                role = msg.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    text = "".join(
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                elif isinstance(content, str):
+                    text = content
+                else:
+                    continue
+
+                if not text.strip():
+                    continue
+
+                ts = entry.get("timestamp", "")
+
+                messages.append({
+                    "role": role,
+                    "content": text,
+                    "timestamp": ts,
+                })
+    except Exception as e:
+        logger.error("Failed to read session JSONL: %s", e)
+        return {"messages": []}
+
+    return {"messages": messages, "sessionKey": session_key}
