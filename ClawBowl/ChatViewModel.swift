@@ -30,6 +30,42 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Session History Sync (OpenClaw native)
+
+    /// Sync with OpenClaw session history to recover messages from offline period.
+    /// Called after warmup when gateway is configured.
+    func syncSessionHistory() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let remote = try await ChatService.shared.fetchSessionHistory(limit: 50)
+                guard !remote.isEmpty else { return }
+
+                let localTimestamps = self.messages.map { $0.timestamp.timeIntervalSince1970 }
+
+                var newMessages: [Message] = []
+                for msg in remote {
+                    let ts = msg.timestamp.timeIntervalSince1970
+                    let isDuplicate = localTimestamps.contains(where: { abs($0 - ts) < 2 })
+                    if !isDuplicate {
+                        newMessages.append(msg)
+                    }
+                }
+
+                if !newMessages.isEmpty {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        self.messages.append(contentsOf: newMessages)
+                        self.messages.sort { $0.timestamp < $1.timestamp }
+                    }
+                    MessageStore.save(self.messages)
+                    self.scrollTrigger &+= 1
+                }
+            } catch {
+                // Silent fail — history sync is best-effort
+            }
+        }
+    }
+
     // MARK: - Ready Gate
 
     func onMessageAppear(_ id: UUID) {
@@ -42,7 +78,7 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Send Message
 
-    func sendMessage(content rawContent: String, attachment: Attachment?) {
+    func sendMessage(content rawContent: String, attachment: Attachment?, replyTo: Message? = nil) {
         let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty || attachment != nil else { return }
         guard !isLoading else { return }
@@ -52,7 +88,7 @@ final class ChatViewModel: ObservableObject {
         activeStreamTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let displayText: String
+                var displayText: String
                 if content.isEmpty {
                     if let att = attachment {
                         displayText = att.isImage ? "[图片]" : "[文件: \(att.filename)]"
@@ -61,6 +97,17 @@ final class ChatViewModel: ObservableObject {
                     }
                 } else {
                     displayText = content
+                }
+
+                // Prepend quote block for reply-to
+                var actualContent = content
+                if let reply = replyTo {
+                    let quoteLine = reply.content.isEmpty ? "[附件]" : reply.quotePreview
+                    let prefix = "> \(reply.role == .user ? "我" : "AI"): \(quoteLine)\n\n"
+                    actualContent = prefix + content
+                    if displayText == content {
+                        displayText = prefix + displayText
+                    }
                 }
 
                 let userMessage = Message(role: .user, content: displayText, attachment: attachment)
@@ -96,7 +143,7 @@ final class ChatViewModel: ObservableObject {
                 let historyMessages = Array(self.messages.dropLast(2))
 
                 let stream = try await ChatService.shared.sendMessageStream(
-                    content,
+                    actualContent,
                     attachment: attachment,
                     history: historyMessages
                 )

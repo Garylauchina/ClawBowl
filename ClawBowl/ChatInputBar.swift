@@ -4,10 +4,11 @@ import UniformTypeIdentifiers
 import UIKit
 import Speech
 
-/// 底部聊天输入栏（支持图片、文件附件、语音输入）
+/// 底部聊天输入栏（支持图片、文件附件、语音输入、引用回复）
 struct ChatInputBar: View {
     @Binding var text: String
     @Binding var selectedAttachment: Attachment?
+    @Binding var replyingTo: Message?
     let isLoading: Bool
     let onSend: () -> Void
     var onStop: (() -> Void)?
@@ -26,6 +27,11 @@ struct ChatInputBar: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // 引用回复预览条
+            if let reply = replyingTo {
+                replyPreview(reply)
+            }
+
             // 附件预览条
             if let att = selectedAttachment {
                 attachmentPreview(att)
@@ -73,6 +79,9 @@ struct ChatInputBar: View {
                         if canSend && !isLoading {
                             onSend()
                         }
+                    }
+                    .onChange(of: isFocused) { focused in
+                        if focused { checkPasteboardForImage() }
                     }
 
                 // Stop / 发送 / 语音 按钮（智能切换）
@@ -137,6 +146,32 @@ struct ChatInputBar: View {
         } message: {
             Text("\"\(rejectedFileName)\" 超过 100MB 限制，请选择较小的文件。")
         }
+        .alert("粘贴图片", isPresented: $showPasteImageAlert) {
+            Button("粘贴") {
+                if let img = UIPasteboard.general.image {
+                    let maxDim: CGFloat = 512
+                    var sz = img.size
+                    if max(sz.width, sz.height) > maxDim {
+                        let scale = maxDim / max(sz.width, sz.height)
+                        sz = CGSize(width: sz.width * scale, height: sz.height * scale)
+                    }
+                    let renderer = UIGraphicsImageRenderer(size: sz)
+                    let resized = renderer.image { _ in img.draw(in: CGRect(origin: .zero, size: sz)) }
+                    if let data = resized.jpegData(compressionQuality: 0.4) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            selectedAttachment = Attachment(
+                                filename: "paste_\(UUID().uuidString.prefix(8)).jpg",
+                                data: data,
+                                mimeType: "image/jpeg"
+                            )
+                        }
+                    }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("剪贴板中有图片，是否粘贴为附件？")
+        }
         .alert("无法使用语音", isPresented: $speechManager.showPermissionAlert) {
             Button("去设置", role: .none) {
                 if let url = URL(string: UIApplication.openSettingsURLString) {
@@ -177,6 +212,41 @@ struct ChatInputBar: View {
         if isLoading { return "AI 正在处理..." }
         if speechManager.isRecording { return "语音识别中..." }
         return "输入消息..."
+    }
+
+    /// 引用回复预览条
+    private func replyPreview(_ msg: Message) -> some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(Color.blue)
+                .frame(width: 3)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(msg.role == .user ? "你" : "AI 助手")
+                    .font(.caption2.bold())
+                    .foregroundColor(.blue)
+                Text(msg.quotePreview)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    replyingTo = nil
+                }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(Color(.systemGray6).opacity(0.5))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     /// 附件预览条（图片缩略图 或 文件图标+文件名）
@@ -225,6 +295,16 @@ struct ChatInputBar: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(Color(.systemGray6).opacity(0.5))
+    }
+
+    /// Detect image in pasteboard when input becomes focused
+    @State private var showPasteImageAlert = false
+
+    private func checkPasteboardForImage() {
+        guard selectedAttachment == nil,
+              UIPasteboard.general.hasImages,
+              UIPasteboard.general.image != nil else { return }
+        showPasteImageAlert = true
     }
 
     /// 有文字或有附件即可发送（isLoading 时由 Stop 按钮接管，不走此分支）
@@ -572,7 +652,7 @@ class SpeechRecognitionManager: ObservableObject {
 #Preview {
     VStack {
         Spacer()
-        ChatInputBar(text: .constant(""), selectedAttachment: .constant(nil), isLoading: false, onSend: {})
-        ChatInputBar(text: .constant(""), selectedAttachment: .constant(nil), isLoading: true, onSend: {}, onStop: {})
+        ChatInputBar(text: .constant(""), selectedAttachment: .constant(nil), replyingTo: .constant(nil), isLoading: false, onSend: {})
+        ChatInputBar(text: .constant(""), selectedAttachment: .constant(nil), replyingTo: .constant(nil), isLoading: true, onSend: {}, onStop: {})
     }
 }

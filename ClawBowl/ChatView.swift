@@ -1,6 +1,45 @@
 import SwiftUI
 import UIKit
 
+// MARK: - Date Separator (Telegram-style)
+
+private struct DateSeparator: View {
+    let date: Date
+
+    var body: some View {
+        Text(Self.formatDate(date))
+            .font(.caption2.weight(.medium))
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .background(Color(.systemGray5).opacity(0.8))
+            .clipShape(Capsule())
+            .padding(.vertical, 6)
+    }
+
+    private static func formatDate(_ date: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(date) { return "今天" }
+        if cal.isDateInYesterday(date) { return "昨天" }
+        let now = Date()
+        if cal.component(.year, from: date) == cal.component(.year, from: now) {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "zh_CN")
+            f.dateFormat = "M月d日"
+            return f.string(from: date)
+        }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "yyyy年M月d日"
+        return f.string(from: date)
+    }
+}
+
+private func shouldShowDateSeparator(current: Message, previous: Message?) -> Bool {
+    guard let prev = previous else { return true }
+    return !Calendar.current.isDate(current.timestamp, inSameDayAs: prev.timestamp)
+}
+
 // MARK: - UIKit Bridge: Scroll Position Detection
 
 struct ScrollPositionHelper: UIViewRepresentable {
@@ -106,6 +145,7 @@ struct ChatView: View {
     @State private var isAtBottom = true
     @State private var stopMomentumTrigger: UInt = 0
     @State private var scrollProxy: ScrollViewProxy?
+    @State private var replyingTo: Message?
 
     var body: some View {
         NavigationStack {
@@ -115,13 +155,16 @@ struct ChatView: View {
                 ChatInputBar(
                     text: $inputText,
                     selectedAttachment: $selectedAttachment,
+                    replyingTo: $replyingTo,
                     isLoading: viewModel.isLoading,
                     onSend: {
                         let content = inputText
                         let att = selectedAttachment
+                        let reply = replyingTo
                         inputText = ""
                         selectedAttachment = nil
-                        viewModel.sendMessage(content: content, attachment: att)
+                        replyingTo = nil
+                        viewModel.sendMessage(content: content, attachment: att, replyTo: reply)
                     },
                     onStop: { viewModel.cancelStream() }
                 )
@@ -132,6 +175,9 @@ struct ChatView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     avatarMenu
                 }
+            }
+            .task {
+                viewModel.syncSessionHistory()
             }
             .sheet(isPresented: $showCronView) {
                 CronView()
@@ -156,12 +202,18 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(viewModel.messages) { message in
-                        MessageBubble(message: message)
-                            .id(message.id)
-                            .onAppear {
-                                viewModel.onMessageAppear(message.id)
-                            }
+                    ForEach(Array(viewModel.messages.enumerated()), id: \.element.id) { index, message in
+                        let prev = index > 0 ? viewModel.messages[index - 1] : nil
+                        if shouldShowDateSeparator(current: message, previous: prev) {
+                            DateSeparator(date: message.timestamp)
+                        }
+                        SwipeToReplyWrapper(message: message, onReply: { replyingTo = $0 }) {
+                            MessageBubble(message: message, onQuoteReply: { replyingTo = $0 })
+                        }
+                        .id(message.id)
+                        .onAppear {
+                            viewModel.onMessageAppear(message.id)
+                        }
                     }
                 }
                 .padding(.vertical, 8)
@@ -264,6 +316,45 @@ struct ChatView: View {
         DispatchQueue.main.async {
             proxy.scrollTo(lastID, anchor: .bottom)
         }
+    }
+}
+
+// MARK: - Swipe to Reply Wrapper (Telegram-style)
+
+private struct SwipeToReplyWrapper<Content: View>: View {
+    let message: Message
+    let onReply: (Message) -> Void
+    @ViewBuilder let content: () -> Content
+
+    @State private var offset: CGFloat = 0
+    private let threshold: CGFloat = 60
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if offset > 20 {
+                Image(systemName: "arrowshape.turn.up.left.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(.secondary.opacity(min(1, offset / threshold)))
+                    .padding(.leading, 16)
+            }
+            content()
+                .offset(x: offset)
+        }
+        .gesture(
+            DragGesture(minimumDistance: 20)
+                .onChanged { value in
+                    let t = value.translation.width
+                    if t > 0 { offset = min(t * 0.6, threshold * 1.2) }
+                }
+                .onEnded { value in
+                    if offset >= threshold {
+                        let impact = UIImpactFeedbackGenerator(style: .light)
+                        impact.impactOccurred()
+                        onReply(message)
+                    }
+                    withAnimation(.easeOut(duration: 0.2)) { offset = 0 }
+                }
+        )
     }
 }
 

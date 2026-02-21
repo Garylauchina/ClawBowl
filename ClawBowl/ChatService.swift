@@ -289,6 +289,69 @@ actor ChatService {
         // is sufficient. No backend endpoint needed.
     }
 
+    // MARK: - Session History (OpenClaw native API)
+
+    /// 从 OpenClaw Gateway 获取会话历史（用于恢复离线期间的消息）
+    func fetchSessionHistory(limit: Int = 50) async throws -> [Message] {
+        guard let gwPath = gatewayPath, let gwToken = gatewayToken else {
+            throw ChatError.serviceUnavailable
+        }
+        guard let sk = sessionKey else { throw ChatError.serviceUnavailable }
+
+        guard let url = URL(string: "\(apiBase)\(gwPath)/api/sessions/\(sk)/history?limit=\(limit)") else {
+            throw ChatError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(gwToken)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 15
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response)
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return []
+        }
+
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fallbackFormatter = ISO8601DateFormatter()
+        fallbackFormatter.formatOptions = [.withInternetDateTime]
+
+        return json.compactMap { entry -> Message? in
+            guard let msgObj = entry["message"] as? [String: Any],
+                  let role = msgObj["role"] as? String,
+                  role == "user" || role == "assistant" else { return nil }
+
+            var text = ""
+            if let content = msgObj["content"] as? String {
+                text = content
+            } else if let parts = msgObj["content"] as? [[String: Any]] {
+                text = parts.compactMap { part -> String? in
+                    if part["type"] as? String == "text" { return part["text"] as? String }
+                    return nil
+                }.joined()
+            }
+
+            guard !text.isEmpty else { return nil }
+
+            let ts: Date
+            if let tsStr = entry["timestamp"] as? String {
+                ts = isoFormatter.date(from: tsStr) ?? fallbackFormatter.date(from: tsStr) ?? Date()
+            } else {
+                ts = Date()
+            }
+
+            return Message(
+                role: Message.Role(rawValue: role) ?? .assistant,
+                content: text,
+                timestamp: ts,
+                status: .sent
+            )
+        }
+    }
+
     // MARK: - Session management
 
     /// 重置会话（请求后端销毁并重建 OpenClaw 实例）

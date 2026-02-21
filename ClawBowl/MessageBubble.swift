@@ -4,6 +4,7 @@ import SwiftUI
 /// 单条消息气泡视图（支持 Markdown 富文本、图片、文件附件和 Agent 生成文件）
 struct MessageBubble: View {
     let message: Message
+    var onQuoteReply: ((Message) -> Void)?
     @State private var decodedAttachmentImage: UIImage?
 
     var body: some View {
@@ -60,10 +61,12 @@ struct MessageBubble: View {
                 .background(bubbleBackground)
                 .clipShape(BubbleShape(isUser: message.role == .user))
                 .contextMenu {
-                    Button {
-                        UIPasteboard.general.string = message.content
-                    } label: {
-                        Label("复制文字", systemImage: "doc.on.doc")
+                    if !message.content.isEmpty {
+                        Button {
+                            UIPasteboard.general.string = message.content
+                        } label: {
+                            Label("复制文字", systemImage: "doc.on.doc")
+                        }
                     }
                     if message.hasImage {
                         Button {
@@ -74,24 +77,24 @@ struct MessageBubble: View {
                             Label("复制图片", systemImage: "photo.on.rectangle")
                         }
                     }
+                    Button {
+                        onQuoteReply?(message)
+                    } label: {
+                        Label("引用回复", systemImage: "arrowshape.turn.up.left")
+                    }
                 }
 
                 // 时间和状态
-                HStack(spacing: 4) {
+                HStack(spacing: 3) {
                     Text(message.timestamp, style: .time)
                         .font(.caption2)
                         .foregroundColor(.secondary)
 
-                    if message.isStreaming {
+                    if message.role == .user {
+                        statusIndicator
+                    } else if message.isStreaming {
                         ProgressView()
-                            .scaleEffect(0.6)
-                    } else if message.status == .sending {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                    } else if message.status == .error {
-                        Image(systemName: "exclamationmark.circle.fill")
-                            .font(.caption2)
-                            .foregroundColor(.red)
+                            .scaleEffect(0.5)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -202,6 +205,30 @@ struct MessageBubble: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(message.role == .user ? Color.white.opacity(0.15) : Color(.systemGray5))
         )
+    }
+
+    // MARK: - Status Indicator (Telegram-style)
+
+    @ViewBuilder
+    private var statusIndicator: some View {
+        switch message.status {
+        case .sending:
+            Image(systemName: "clock")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary.opacity(0.6))
+        case .sent:
+            Image(systemName: "checkmark")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(message.role == .user ? .white.opacity(0.7) : .blue)
+        case .error:
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 10))
+                .foregroundColor(.red)
+        case .filtered:
+            Image(systemName: "eye.slash")
+                .font(.system(size: 10))
+                .foregroundColor(.orange)
+        }
     }
 
     // MARK: - Helpers
@@ -389,4 +416,16 @@ struct StreamingCursor: View {
         ))
     }
     .padding()
+}
+
+// MARK: - Quoted Reply Preview (embedded in MessageBubble)
+
+extension Message {
+    var quotePreview: String {
+        let text = content.isEmpty ? (attachment?.isImage == true ? "[图片]" : "[文件]") : content
+        if text.count > 60 {
+            return String(text.prefix(60)) + "…"
+        }
+        return text
+    }
 }

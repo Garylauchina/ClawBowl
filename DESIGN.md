@@ -1,4 +1,4 @@
-# ClawBowl / Tarz 系统设计文档（V13）
+# ClawBowl / Tarz 系统设计文档（V14）
 
 > 最后更新：2026-02-22
 >
@@ -35,19 +35,18 @@ Tarz 是一个面向普通用户的托管式 AI Agent 平台，基于 OpenClaw �
 ### 2.1 控制面（Control Plane）
 
 **负责**：
-- 用户注册与订阅
-- OpenClaw 实例生命周期管理
-- 版本库（Snapshot）管理
-- 备份与恢复
-- 实例升级与回滚
-- API 路由
-- 文件中转（接收 → 存入 inbox → 发引用消息）
-- 会话历史 API（从数据库分页查询）
+- 用户注册与订阅、JWT 认证
+- OpenClaw 实例生命周期管理（启动/停止/升级/恢复）
+- warmup：返回 Gateway 直连凭证（`gateway_url` + `gateway_token` + `session_key`）
+- 附件上传中转（`/api/v2/files/upload` → workspace `media/inbound/`）
+- 版本库（Snapshot）管理 + 备份与恢复
+- APNs 推送转发
 
 **不负责**：
+- 聊天消息路由（已移至 iOS App → Gateway 直连）
+- 对话持久化（由 OpenClaw session JSONL + iOS 本地 MessageStore 承担）
 - 文档解析 / OCR / 文件理解
-- 模型调用细节
-- Agent 推理逻辑
+- 模型调用细节 / Agent 推理逻辑
 
 ### 2.2 执行面（Execution Plane）
 
@@ -64,37 +63,38 @@ OpenClaw 以 Gateway 模式运行，提供：
 
 ### 2.3 架构哲学：宿主机作为服务者
 
-> 更新：2026-02-19
+> 更新：2026-02-22
 
 **核心原则：宿主机是服务者，不是控制者。Agent 实例如何演化，宿主机不干预。**
 
 ```
 ┌─ iOS App ──────────────────────────────────────────────┐
-│  ChatView / ChatViewModel / NotificationManager        │
+│  ChatView / ChatViewModel / ChatService / MessageStore │
 └────────────────────────────────────────────────────────┘
-           ↕ HTTPS + SSE
-┌─ Backend（服务者）────────────────────────────────────┐
-│  职责：                                                 │
-│  ├─ 用户管理、认证                                      │
-│  ├─ OpenClaw 容器生命周期维护（启动/停止/升级/恢复）     │
-│  ├─ 对话全量持久化（chat_logs 表）                       │
-│  ├─ 数据/记忆备份（Snapshot）                           │
-│  ├─ 消息路由（proxy.py → OpenClaw API）                 │
-│  ├─ APNs 推送转发（alert_monitor → Apple）              │
-│  └─ 文件读取（直接访问 workspace 目录）                  │
-│  不做：                                                 │
-│  ├─ 不修改 OpenClaw 内部状态                             │
-│  ├─ 不注入 Agent 行为规则（AGENTS.md 由 Agent 自行维护） │
-│  └─ 不干预 Agent 的技能/记忆演化                         │
-└────────────────────────────────────────────────────────┘
-           ↕ HTTP (OpenAI 兼容 API)
-┌─ OpenClaw Gateway（数字灵魂，Docker 容器）──────────┐
-│  完全自治：Agent 自主管理 AGENTS.md / MEMORY.md / skills │
-│  Backend 零侵入：仅通过 HTTP API 通信                    │
-└────────────────────────────────────────────────────────┘
+   │                                              │
+   │ ① warmup / upload / auth                     │ ② 对话直连
+   │    (HTTPS → Backend)                         │    (HTTPS + SSE → nginx → Gateway)
+   ↓                                              ↓
+┌─ Backend（服务者）──────┐   ┌─ nginx (/gw/{port}/) ─┐
+│  用户管理 / 认证          │   │  反向代理到容器端口      │
+│  容器生命周期              │   └───────────────────────┘
+│  warmup 返回直连凭证       │              │
+│  附件上传 → workspace      │              ↓
+│  备份/恢复/升级/回滚       │   ┌─ OpenClaw Gateway ──────────────┐
+│  APNs 推送转发             │   │  完全自治：Agent 自主管理        │
+│  不做：                    │   │  AGENTS.md / MEMORY.md / skills │
+│  ├─ 不路由聊天消息         │   │  Backend 零侵入                  │
+│  ├─ 不存储对话内容         │   └──────────────────────────────────┘
+│  └─ 不干预 Agent 演化     │
+└──────────────────────────┘
 ```
 
-**零侵入原则**：Backend 与 OpenClaw 容器的唯一交互方式是 HTTP API。不直接修改 OpenClaw 管理的文件（如 AGENTS.md），不干预 Agent 运行时状态。Backend 通过 bind mount 目录读取 workspace 文件和 cron 配置，但不写入。这确保 OpenClaw 可平滑升级，Agent 的演化完全自主。
+**架构要点（V14 更新）**：
+1. **对话数据路径不再经过 Backend**。iOS App 通过 nginx `/gw/{port}/` 直连 OpenClaw Gateway，发送和接收均在此通道完成。Backend 的 `proxy.py` 厚代理已清除。
+2. **Backend 仅负责控制面**：认证、容器编排、warmup 凭证下发、附件上传中转、备份恢复。
+3. **对话持久化由 OpenClaw + iOS 本地各自负责**：OpenClaw 在 `agents/{id}/sessions/*.jsonl` 保存完整会话历史；iOS 在 `MessageStore`（SQLite）保存本地副本。Backend `chat_logs` 表仅保留历史归档数据，不再写入新消息。
+
+**零侵入原则**：Backend 与 OpenClaw 容器的唯一交互方式是 HTTP API（warmup 时读取端口/token）。不直接修改 OpenClaw 管理的文件（如 AGENTS.md），不干预 Agent 运行时状态。Backend 通过 bind mount 目录读取 workspace 文件和 cron 配置，但不写入。这确保 OpenClaw 可平滑升级，Agent 的演化完全自主。
 
 ---
 
@@ -162,7 +162,7 @@ OpenClaw 在 Docker 容器内运行，数据通过 bind mount 持久化到宿主
   workspace/        ← bind mount 自宿主机 workspace/
 ```
 
-Backend（proxy.py、file_router 等）通过宿主机侧 bind mount 目录直接读取 workspace 文件和 cron 配置，无需进入容器。
+Backend（file_router、instance_manager 等）通过宿主机侧 bind mount 目录直接读取 workspace 文件和 cron 配置，无需进入容器。
 
 ---
 
@@ -367,16 +367,25 @@ Backend（proxy.py、file_router 等）通过宿主机侧 bind mount 目录直�
 
 控制面（Orchestrator）只负责文件中转，不负责理解。
 
-### 8.2 流程
+### 8.2 流程（V14 架构）
 
 1. iOS 发送含图片/文件的请求
-2. Orchestrator 提取文件 → 存入 `{workspace}/media/inbound/{filename}`
-3. 向 OpenClaw 发送引用消息：`[用户发送了文件: media/inbound/{filename}]`
+2. **图片（< 10MB）**：直接在 Gateway 直连消息的 `content` 数组中嵌入 `image_url`（base64），OpenClaw 原生处理
+3. **大文件（≥ 10MB）**：先 POST 到 `POST /api/v2/files/upload`（Backend 存入 `{workspace}/media/inbound/{safe_name}`），再在消息中引用路径
 4. OpenClaw 自行识别文件类型、调用 image/read/exec 等工具处理
 
-### 8.3 Fallback
+### 8.3 附件上传端点
 
-如果 OpenClaw 内置工具无法处理（如 image 工具失败），Orchestrator 可调用外部视觉模型预处理，将描述文本转发给 OpenClaw。
+`POST /api/v2/files/upload`（multipart form data）：
+- JWT 认证
+- 文件名安全化（UUID 前缀 + 原始文件名）
+- 存储到 workspace `media/inbound/`
+- 返回 `{path, filename, size}`
+- 上限 100MB
+
+### 8.3.1 Fallback
+
+如果 OpenClaw 内置工具无法处理（如 image 工具失败），可调用外部视觉模型预处理，将描述文本转发给 OpenClaw。
 
 ### 8.4 文件下载（Agent 生成文件 → 用户手机）
 
@@ -581,7 +590,7 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
          ↓ 仍失败
        → MiMo V2 Flash（兜底）
          ↓ 仍失败
-       → 返回错误 → proxy.py 包装为友好提示
+       → 返回错误 → iOS ChatService 展示友好提示
 ```
 
 **OpenClaw 还内置 Auth Cooldown 机制：**
@@ -590,10 +599,10 @@ OpenClaw 网关层已内置完整的模型故障转移机制，只需在 `opencl
 - 同一 session 内粘住同一个 auth profile（缓存友好），直到失败才切换
 
 **这意味着**：
-- **不需要在 proxy.py 中自建 fallback 逻辑** — OpenClaw 网关层已处理
-- proxy.py 只需做**错误包装**：将 OpenClaw 最终返回的错误转为友好提示
+- OpenClaw 网关层已处理全部 fallback 逻辑，无需外部干预
 - 切换模型对用户完全透明，回复质量可能略有差异但服务不中断
 - 所有切换记录在 OpenClaw 日志中，可用于分析 LLM 稳定性
+- V14 架构中 iOS App 直连 Gateway，错误展示由 `ChatService` 客户端处理
 
 > **阶段**：Phase 1（与 Stop 按钮、文件下载同批实现）。错误体验直接决定用户留存率。
 
@@ -647,7 +656,7 @@ ChatView（纯 UI）
 | **自定义 Equatable** | `Message` 默认 Equatable 比较 `Attachment.data`（大二进制） | 自定义 `==`：仅比较 `id, content, thinkingText, status, isStreaming, files.count` | diff 成本降 90%+ | ✅ |
 | **图片异步解码** | `UIImage(data:)` 在 body 内同步解码阻塞主线程 | 改用 `@State decodedImage` + `.task` 后台解码 + 占位 ProgressView | 主线程零阻塞 | ✅ |
 | **MessageStore 异步加载** | `@State` 初始化时同步 `FileManager.read` | 改为空数组初始化 + `.task { MessageStore.load() }` | 启动不卡顿 | ✅ |
-| **服务端分页** | 本地缓存 50 条消息上限，历史不可回溯 | `POST /api/v2/chat/history` 分页 API + 上滑触发 `loadOlderMessages()` | 无限历史回溯 | ✅ |
+| **服务端分页** | 本地缓存 50 条消息上限，历史不可回溯 | 本地 MessageStore 持久化 + `POST /api/v2/chat/history` 归档查询（V14：待接入 `sessions_history` API） | 本地持久 + 服务端可恢复 | ✅ |
 | **UI 精简** | toolbar 多个按钮占空间 | 合并为头像 Menu（定时任务 + 退出登录） | 界面更简洁 | ✅ |
 
 ### 9.9 内容安全过滤
@@ -656,67 +665,57 @@ ChatView（纯 UI）
 
 当 DeepSeek LLM 因上下文中存在敏感内容而返回 0-chunk 空响应时：
 
-1. **后端检测**：`proxy.py` 在 `data: [DONE]` 时检查 `chunk_count == 0`
-   - 对话历史 > 4 条消息 → 判定为内容安全过滤，发送 `filtered` 事件
-   - 对话历史 ≤ 4 条消息 → 判定为实例启动问题，发送普通错误提示
-2. **前端响应**：收到 `filtered` 事件后自动清理最近 2 轮对话（4 条消息），显示临时提示
+> 注：V14 架构中对话直连 Gateway，原 `proxy.py` 的 0-chunk 检测逻辑已随厚代理移除。
+> 内容安全过滤现由 iOS `ChatService` 客户端侧检测（SSE 流结束时无有效内容 → 标记 filtered）。
+
+1. **客户端检测**：`ChatService` 在 SSE 流结束时检查是否收到有效内容
+2. **前端响应**：收到 filtered 状态后自动清理最近 2 轮对话（4 条消息），显示临时提示
 3. **历史防御**：`ChatService.buildRequestMessages()` 自动跳过 `.error` 和 `.filtered` 状态的消息
 
 ---
 
 ## 10. 前端上下文管理
 
-> 更新：2026-02-19。ChatViewModel + 分页 API 已实现。
+> 更新：2026-02-22。架构重构：对话直连 Gateway，Backend 退出数据路径。
 
-### 10.1 架构（混合方案）
+### 10.1 架构（V14：Gateway 直连 + 本地持久化）
 
-- **权威数据源**：后端 `chat_logs` 表（全量对话持久化）
-- **后端分页 API**：`POST /api/v2/chat/history`（POST 绕过 CDN 拦截），Body: `{limit, before, after}`
-  - 从 `chat_logs` 表按 `user_id + created_at DESC` 分页查询
-  - 自动过滤 `status='filtered'` 的记录
-  - 返回 `{messages: [...], has_more: bool}`
-  - 每条消息含 `event_id` 用于前后端去重
-- **iOS 本地缓存**：MessageStore JSON 文件持久化（200 条上限），作为快速启动缓存
+- **对话数据路径**：iOS App ↔ nginx `/gw/{port}/` ↔ OpenClaw Gateway（Backend 不经手）
+- **权威数据源**：
+  - **OpenClaw session JSONL**：`agents/{id}/sessions/*.jsonl`，完整的服务端会话记录
+  - **iOS MessageStore**：本地 SQLite，App 端聊天记录持久化（启动缓存 + 离线可用）
+- **历史归档**：Backend `chat_logs` 表保留早期数据，`POST /api/v2/chat/history` 端点仍可查询旧记录
+- **warmup 端点**：`POST /api/v2/chat/warmup` 返回 `{gateway_url, gateway_token, session_key}`
 
 ### 10.2 交互流程
 
-- **启动时**：先从本地 JSON 缓存加载（毫秒级），后台静默调用 history API 同步差量
-- **发消息时**：ChatViewModel 管理内存 + 完成后写入本地 JSON 缓存
-- **上滑加载**：顶部消息 `onAppear` 触发 `loadOlderMessages()` → 调用 history API `before={最老时间戳}`
-- **本地缓存上限**：200 条，更早的按需从后端分页拉取
-- **去重机制**：后端返回 `event_id`，iOS 端用 `Message.eventId` 与本地消息匹配，避免重复
+- **启动时**：从 MessageStore 加载本地记录（毫秒级）→ 调用 warmup 获取 Gateway 直连凭证
+- **发消息时**：`ChatService.sendMessageStream()` 直接 POST 到 Gateway SSE 端点
+- **接收回复**：客户端解析 OpenClaw 原生 SSE 事件（`delta.tool_calls` → thinking，`finish_reason` → 轮次边界）
+- **离线恢复**：App 重新打开后，可通过 Gateway 的 `sessions_history` API 获取 App 关闭期间的消息（待实现）
+- **附件上传**：先上传到 Backend（`POST /api/v2/files/upload` → workspace `media/inbound/`），再在消息中引用路径
 
-### 10.3 后端对话全量持久化
+### 10.3 对话持久化（历史归档）
 
-> 更新：2026-02-17。为未来的记忆梳理机制奠定数据基础。
+> 更新：2026-02-22。`chat_logs` 表已停止写入新消息，仅保留历史数据供查询。
 
-**`chat_logs` 表结构：**
+**`chat_logs` 表结构（归档）：**
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | UUID PK | 每条记录唯一 ID |
 | `user_id` | FK → users.id | 用户标识 |
-| `event_id` | UUID (indexed) | 同一请求-响应对共享，关联完整对话轮次 |
+| `event_id` | UUID (indexed) | 同一请求-响应对共享 |
 | `role` | String | `user` 或 `assistant` |
 | `content` | Text | 完整对话原文 |
-| `thinking_text` | Text (nullable) | AI 思考过程文本（tool 状态等） |
-| `attachment_paths` | Text (nullable) | JSON 数组，文件引用路径 |
-| `tool_calls` | Text (nullable) | JSON 数组，工具名称和参数摘要 |
+| `thinking_text` | Text (nullable) | AI 思考过程文本 |
+| `attachment_paths` | Text (nullable) | JSON 数组 |
+| `tool_calls` | Text (nullable) | JSON 数组 |
 | `status` | String | `success` / `error` / `filtered` |
 | `model` | String (nullable) | 使用的 LLM 模型 |
 | `created_at` | DateTime (tz) | UTC 时间戳 |
 
-**采集时机：**
-
-1. 请求到达 → 立即写入用户消息（`role=user`）
-2. SSE 流结束 → `_logged_stream` wrapper 累积完整 AI 回复后写入（`role=assistant`）
-3. 非流式请求 → 响应返回后写入
-
-**设计原则：**
-
-- 日志写入失败不影响聊天功能（fire-and-forget，异常仅记录日志）
-- 使用独立 DB session，不与请求 session 耦合
-- 每次请求生成唯一 `event_id`，可按 event_id 关联请求-响应对
+**当前状态**：不再写入新记录。`_save_log` 和 `_logged_stream` 已移除。`POST /api/v2/chat` 端点已移除。
 
 **后续用途：**
 
@@ -733,11 +732,9 @@ ChatView（纯 UI）
 1. **下载 API**：`GET /api/v2/files/download?path={relative_path}&token={jwt}`
    - 支持 URL 参数 token（主）和 Authorization header（备），兼容 CDN 场景
    - `is_relative_to()` 路径穿越防护 + 自动推断 MIME type + FileResponse 流式返回
-2. **Workspace Diff**：`proxy_chat_stream()` 在 SSE 流开始前快照 workspace 目录（文件名+size+mtime），`[DONE]` 之前再次扫描，对比找出新增/修改文件
-   - 使用 `os.walk` + 目录剪枝（排除 `venv/node_modules/__pycache__` 等），性能从 1069ms 降至 1.1ms
-3. **SSE File 事件注入**：新增/修改的文件以 `{"choices":[{"delta":{"file":{...}}}]}` 格式注入 SSE 流末尾
-4. **图片内联 Base64**：对 ≤512KB 的图片文件，在 SSE file 事件中嵌入 base64 编码的完整图片数据（`data` 字段），前端无需额外下载
-5. **排除规则**：`media/inbound/`（用户上传）、`memory/`、`skills/`、隐藏文件/目录
+2. **Workspace Diff（V14 状态）**：原 `proxy_chat_stream()` 的 workspace diff 逻辑已随厚代理移除。当前文件检测依赖 Agent 在回复中提及的文件路径（正则匹配），下载 API 仍可用
+   > 待办：评估是否需要在 iOS 客户端或 Backend 侧重新实现 workspace diff 能力
+3. **文件下载 API**：`GET /api/v2/files/download?path={relative_path}&token={jwt}` 仍正常工作
 
 **CDN 兼容性设计：**
 
@@ -985,35 +982,35 @@ Secrets：
 
 ```
 ┌─ iOS App（SwiftUI）──────────────────────────────────┐
+│  ChatView / ChatService / MessageStore                 │  ← 我们的代码
 │  FileCardView / FileDownloader / FullScreenImageViewer │  ← 我们的代码
-│  ChatView / MessageBubble / MarkdownUI                 │  ← 我们的代码
 └────────────────────────────────────────────────────────┘
-          ↕ HTTPS + SSE
-┌─ Backend Proxy（FastAPI）─────────────────────────────┐
-│  proxy.py: 日期注入 / workspace diff / SSE file 事件   │  ← 我们的代码
-│  file_router.py: 文件下载 API                          │  ← 我们的代码
-│  chat_router.py: 对话持久化 / 流式包装                  │  ← 我们的代码
-│  auth.py: JWT 认证                                     │  ← 我们的代码
-└────────────────────────────────────────────────────────┘
-          ↕ HTTP (OpenAI 兼容 API)
-┌─ OpenClaw Gateway（Docker 容器）───────────────────┐
-│  openclaw gateway --bind 0.0.0.0 --port 18789        │  ← 容器内监听
-│  /data/config/openclaw.json                           │  ← bind mount 配置
-│  /data/workspace/                                     │  ← bind mount 工作区
-└────────────────────────────────────────────────────────┘
+     │ warmup/upload (HTTPS)      │ 对话直连 (HTTPS+SSE)
+     ↓                            ↓
+┌─ Backend（FastAPI）─────┐  ┌─ nginx /gw/{port}/ ─────┐
+│  chat_router.py: warmup  │  │  反向代理 → 容器端口     │
+│  file_router.py: 上传/下载│  └────────────────────────┘
+│  auth.py: JWT 认证        │           │
+│  instance_manager.py      │           ↓
+└──────────────────────────┘  ┌─ OpenClaw Gateway ──────┐
+                              │  动态端口（19xxx）        │
+                              │  openclaw.json (bind mount)│
+                              │  /data/workspace/          │
+                              └────────────────────────────┘
 ```
 
 **逐项确认：**
 
 | 类别 | 文件 | 是否触碰 OpenClaw 内核 | 说明 |
 |------|------|----------------------|------|
-| iOS 前端 | `ClawBowl/*.swift`（15+ 个文件） | ❌ 完全独立 | SwiftUI 前端，通过 HTTPS 与后端通信 |
-| 后端代理 | `backend/app/**/*.py`（15+ 个文件） | ❌ 完全独立 | FastAPI 服务，通过 HTTP 转发到 OpenClaw |
+| iOS 前端 | `ClawBowl/*.swift`（15+ 个文件） | ❌ 完全独立 | SwiftUI 前端，直连 Gateway 或通过 HTTPS 调后端控制面 |
+| 后端控制面 | `backend/app/**/*.py`（15+ 个文件） | ❌ 完全独立 | FastAPI 服务，仅提供认证/编排/上传/备份 |
+| nginx 配置 | `/etc/nginx/sites-enabled/clawbowl` | ❌ 基础设施 | `/gw/{port}/` 反向代理到容器，无业务逻辑 |
 | OpenClaw 配置 | `openclaw.json` | ❌ 仅配置 | 模型/fallback/工具开关，属于正常运维操作 |
 | OpenClaw 安装 | `npm install -g openclaw` | ❌ 官方包 | 全局安装，不修改源码 |
 | Workspace 文件 | `AGENTS.md / SOUL.md / MEMORY.md` | ❌ 配置级 | Agent 行为规则，属于用户数据层，非内核 |
 
-**升级路径**：停服务 → `npm update -g openclaw` → 启动服务（复用 state 目录）→ 健康检查。我们的所有改动（proxy / iOS / 下载 API）对 OpenClaw 完全透明。
+**升级路径**：停服务 → `npm update -g openclaw` → 启动服务（复用 state 目录）→ 健康检查。我们的所有改动（iOS 直连 / Backend 控制面 / nginx 路由）对 OpenClaw 完全透明。
 
 ---
 
@@ -1021,14 +1018,15 @@ Secrets：
 
 | 层 | 技术 |
 |----|------|
-| iOS 客户端 | SwiftUI + ChatViewModel + MarkdownUI + Keychain |
-| 后端控制面 | Python FastAPI + SQLAlchemy + Docker SDK (容器管理) |
-| 执行面 | OpenClaw 2.19-2 Gateway (Node.js)，Docker 容器 |
-| 反向代理 | Nginx + Let's Encrypt |
+| iOS 客户端 | SwiftUI + ChatService（直连 Gateway SSE）+ MessageStore + MarkdownUI + Keychain |
+| 后端控制面 | Python FastAPI + SQLAlchemy + Docker SDK（容器管理）|
+| 对话通道 | iOS App → nginx `/gw/{port}/` → OpenClaw Gateway（直连，不经过 Backend）|
+| 执行面 | OpenClaw 2.19-2 Gateway (Node.js)，Docker 容器，动态端口（19xxx）|
+| 反向代理 | Nginx（API 路由 + Gateway 直连代理 + SSE 流式支持）+ Cloudflare |
 | LLM 提供商 | ZenMux（当前主力聚合层）；OpenRouter（备选，暂不集成） |
 | 搜索 API | Tavily（Agent 联网搜索） |
-| 数据库 | SQLite（控制面元数据 + 对话持久化） |
-| 认证 | JWT + Keychain（iOS） |
+| 数据库 | SQLite（控制面元数据；`chat_logs` 仅保留历史归档，不再写入新消息） |
+| 认证 | JWT + Keychain（iOS），Gateway Token（OpenClaw 直连认证） |
 | 推送 | APNs（HTTP/2 + JWT） |
 | 容器运行环境 | Docker + Chromium 145 + Xvfb + Git + SSH |
 | 未来（多用户） | Firecracker MicroVM + KVM 基础设施（远期） |
@@ -1097,11 +1095,16 @@ Secrets：
 
 **后端模块化（微内核架构）**：
 ```
-iOS App ──── API Gateway ──┬── 消息转发模块（proxy.py）
-                           ├── LLM 管理模块（模型切换、计费、限流）
-                           ├── 记忆模块（OpenClaw 内置，可替换）
-                           ├── 用户数据模块（认证、配额、偏好）
-                           └── 实例管理模块（systemd / 未来 MicroVM）
+iOS App ──┬── Backend API ──┬── 用户认证/配额模块（auth.py）
+          │                 ├── 实例编排模块（instance_manager.py）
+          │                 ├── warmup/凭证下发（chat_router.py）
+          │                 ├── 附件上传中转（file_router.py）
+          │                 ├── 备份/恢复（snapshot_service.py）
+          │                 └── APNs 推送（apns_service.py）
+          │
+          └── Gateway 直连（nginx /gw/{port}/）
+                   │
+                   └── OpenClaw Gateway（对话 + LLM + 记忆 + 工具）
 ```
 
 **OpenClaw 定位**：当前作为"能力底座"使用，所有接口抽象化，未来可替换为自建或其他框架。
@@ -1312,7 +1315,7 @@ ZenMux 是 Tarz 当前的 LLM 聚合层，通过统一的 OpenAI 兼容接口接
 
 #### 问题描述
 
-当前 Agent 使用的 LLM（DeepSeek V3.2 等）没有实时联网能力。虽然 proxy.py 注入了日期上下文使 Agent 知道"今天是 2026-02-18"，但 LLM 的训练数据存在截止日期，导致以下问题：
+当前 Agent 使用的 LLM（DeepSeek V3.2 等）没有实时联网能力。虽然 AGENTS.md 中包含日期上下文使 Agent 知道当前日期，但 LLM 的训练数据存在截止日期，导致以下问题：
 
 ```
 用户："显示近 5 个月比特币价格走势图"
@@ -1345,7 +1348,7 @@ Agent 行为：
 | **免费额度** | 搜索本身收费（即使模型免费） | 搜索本身收费 |
 | **免费模型限流** | 20 req/min, 200 req/day | 未公开 |
 | **已接入 Tarz** | ❌ 暂不集成（API Key 已备） | ✅ 已接入 |
-| **与 OpenClaw 兼容性** | 需改 proxy 添加 `:online` | 需改 proxy 添加 `web_search_options` |
+| **与 OpenClaw 兼容性** | 需在请求层添加 `:online` | 需在请求层添加 `web_search_options` |
 
 #### 推荐策略：A + 监控
 
@@ -1363,7 +1366,7 @@ Agent 行为：
 - 任何用户明确要求"最新"或"当前"的信息
 ```
 
-**中期（Phase 3）**：如果提示词方案不够可靠，再考虑在 proxy 层为特定场景（如检测到金融/天气关键词）自动启用 ZenMux `web_search_options`。
+**中期（Phase 3）**：如果提示词方案不够可靠，再考虑在 OpenClaw 配置层或 Skill 机制中为特定场景自动启用联网搜索。
 
 **不推荐**：完全剔除非联网 LLM。原因：
 1. 国内免费联网 LLM 几乎不存在——联网能力都需额外付费
@@ -1534,13 +1537,13 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
 | E1 | **Gateway Auth** | token / password 认证 | ✅ | token 认证正常 |
 | E2 | **Gateway 设备配对** | 设备 token + operator scopes | ✅ | 容器重建后重新配对正常 |
 | E3 | **Health Checks** | `/api/health` 健康检查端点 | ✅ | warmup 预热使用 |
-| E4 | **OpenAI HTTP API** | `/v1/chat/completions` 兼容接口 | ✅ | proxy.py 通过此接口与 Gateway 通信 |
+| E4 | **OpenAI HTTP API** | `/v1/chat/completions` 兼容接口 | ✅ | iOS App 通过 nginx 直连此接口与 Gateway 通信（V14 架构） |
 | E5 | **Control UI / Dashboard + WebChat** | 浏览器端 Gateway 控制面板（含 Chat 标签页即 WebChat） | ✅ | `controlUi.enabled: true` 后返回完整 Vite+Lit SPA 页面 |
 | E7 | **TUI** | 终端文本 UI | ✅ | `openclaw tui --message` 连接成功，发送/接收消息正常 |
 | E8 | **Tailscale 远程访问** | serve / funnel / tailnet 三种模式 | ❌ 不可用 | 详见 23.4 节分析 |
 | E9 | **Logging** | 日志系统（session JSONL + gateway log） | ✅ | JSONL 转录正常 |
 | E10 | **Usage Tracking** | Token 用量统计 | ✅ | 每 session 内嵌 token 使用率（如 `13k/128k (10%)`），`sessions list` 可查 |
-| E11 | **Timezone** | 时区感知（Agent 日期/时间） | ✅ | proxy.py 日期注入 + 容器 TZ 设置 |
+| E11 | **Timezone** | 时区感知（Agent 日期/时间） | ✅ | AGENTS.md 日期规则 + 容器 TZ 设置（V14 后不再依赖 proxy 注入） |
 | E12 | **Bonjour Discovery** | 局域网设备自动发现 | — 不适用 | Docker 网络隔离，不支持 mDNS |
 
 #### F. 消息渠道（Channels — Tarz 不使用）
@@ -1581,13 +1584,15 @@ Cron 定时任务 → Agent 执行检测 → 写入 workspace/.alerts.jsonl
 
 以下工作在 OpenClaw 容器化功能验证完成后依次推进：
 
-| # | 任务 | 说明 | 优先级 |
-|---|------|------|--------|
-| B.1 | **基础 Snapshot 备份** | tar.zst + manifest.json（详见第 6 章） | ⭐⭐⭐ |
-| B.2 | **用户初始配置文件集落地** | 详见第 19 章，确保新用户开通自动获得完整环境 | ⭐⭐⭐ |
-| B.3 | **APNs 系统推送** | 代码已完成，待 Apple Developer Console 创建 p8 Key | ⭐⭐ |
-| B.4 | **Cron 任务手动编辑/删除** | 前端 CronView 增加编辑和删除操作 | ⭐⭐ |
-| B.5 | **推荐指令库集成** | 2000 条指令，首次启动 + 空闲时推荐 | ⭐ |
+| # | 任务 | 说明 | 状态 |
+|---|------|------|------|
+| B.0 | ~~**Gateway 直连架构**~~ | iOS App 直连 Gateway + 死代码清理 + 附件上传端点 | ✅ V14 已完成 |
+| B.1 | **基础 Snapshot 备份** | tar.zst + manifest.json（详见第 6 章） | ⭐⭐⭐ 待实现 |
+| B.2 | **用户初始配置文件集落地** | 详见第 19 章，确保新用户开通自动获得完整环境 | ⭐⭐⭐ 待实现 |
+| B.3 | **APNs 系统推送** | 代码已完成，待 Apple Developer Console 创建 p8 Key | ⭐⭐ 待配置 |
+| B.4 | **Cron 任务手动编辑/删除** | 前端 CronView 增加编辑和删除操作 | ⭐⭐ 待实现 |
+| B.5 | **推荐指令库集成** | 2000 条指令，首次启动 + 空闲时推荐 | ⭐ 待实现 |
+| B.6 | **OpenClaw 原生 iOS 支持评估** | sessions_history 恢复 + 附件优化 + Hooks 推送（详见 25 章） | ⭐⭐ 待评估 |
 
 ### Phase 2 — 单用户功能完善
 
@@ -1782,7 +1787,7 @@ backend/templates/
 
 ## 20. 当前阶段实施优先级
 
-> 更新：2026-02-21
+> 更新：2026-02-22
 
 ### ★ 第一优先级：单用户单容器 OpenClaw 全功能验证
 
@@ -1802,13 +1807,17 @@ backend/templates/
 
 ### 第二优先级：收尾工作（容器化功能验证完成后）
 
-0. **消息异步收发**（Session Reconciliation，详见 21.2 节）← 当前进行中
+0. **Gateway 直连架构** ✅ 已完成（V14 架构重构，详见 2.3 节和 21.2 节）
 1. **配置自动同步**（`_sync_config` — 模板更新自动应用到现有用户）✅ 已完成
-2. **基础 Snapshot 备份**（tar.zst + manifest，数据安全网）
-3. **用户初始配置文件集落地**（详见第 19 章）
-4. **APNs 推送**（代码已完成，待 Apple Developer Console 创建 p8 Key）
-5. **Cron 任务手动编辑/删除**
-6. **推荐指令库集成**（2000 条指令）
+2. **死代码清理** ✅ 已完成（proxy.py 厚代理、session_reconciler.py、chat_logs 写入逻辑）
+3. **附件上传端点** ✅ 已完成（`POST /api/v2/files/upload`）
+4. **CDN/ICP 拦截修复** ✅ 已完成（warmup 改 POST 绕过 GET 请求拦截）
+5. **基础 Snapshot 备份**（tar.zst + manifest，数据安全网）
+6. **用户初始配置文件集落地**（详见第 19 章）
+7. **APNs 推送**（代码已完成，待 Apple Developer Console 创建 p8 Key）
+8. **Cron 任务手动编辑/删除**
+9. **推荐指令库集成**（2000 条指令）
+10. **OpenClaw 原生 iOS 支持方案评估**（详见 25 章）
 
 ### 后续规划
 
@@ -1871,6 +1880,21 @@ backend/templates/
 
 </details>
 
+<details>
+<summary>V14 架构重构 — Gateway 直连 + 死代码清理 ✅</summary>
+
+> 2026-02-22
+
+1. **Gateway 直连**：iOS App 通过 nginx `/gw/{port}/` 直连 OpenClaw Gateway，对话不再经过 Backend
+2. **nginx 配置**：新增 `location ~ "^/gw/(19[0-9][0-9][0-9])/(.*)"` 反向代理规则（SSE 流式支持）
+3. **warmup 端点改造**：`POST /api/v2/chat/warmup` 返回 `{gateway_url, gateway_token, session_key}`
+4. **附件上传**：`POST /api/v2/files/upload` — multipart 上传到 workspace `media/inbound/`
+5. **iOS ChatService 重写**：直连 Gateway SSE，客户端解析 `delta.tool_calls` 和 `finish_reason`
+6. **死代码清理**：`proxy.py` 厚代理（800+ 行）→ 空 stub；删除 `session_reconciler.py`；移除 `ChatMessage`/`ChatRequest` schema
+7. **CDN/ICP 修复**：warmup 从 GET 改 POST 绕过 Tencent/DNSPod ICP 拦截
+
+</details>
+
 ---
 
 ## 21. 已知问题
@@ -1881,87 +1905,45 @@ backend/templates/
 
 **影响范围**：与 Linux 概念同名但语义不同的工具（cron、gateway、sessions_spawn 等）；与 Linux 语义一致的工具（read/write/exec）不受影响。
 
-**当前缓解措施**：TOOLS.md 显式标注工具用法 + proxy.py 在关键词触发时注入系统消息。
+**当前缓解措施**：TOOLS.md 显式标注工具用法 + AGENTS.md 内嵌 Cron 工具使用指南。
 
 **容器环境的影响**：容器内系统 crontab 不存在，当 LLM 误将 `cron` 工具理解为系统 `crontab` 并尝试执行时，会遇到"命令不存在"错误并进一步回退到 shell 脚本方案。
 
-**当前缓解**：proxy.py 在检测到 cron 关键词时注入系统消息，强制引导 LLM 使用正确的 API。
+> 注：V14 架构中 `proxy.py` 已清空（对话不再经过 Backend），原先的关键词注入系统消息机制不再可用。需改用 Skill 机制或 AGENTS.md 提示词引导 LLM 使用正确的 API。
 
-**未来方案**：考虑用 Skill 机制注入更完整的工具使用指南（token 免费，可以不惜篇幅）。
+**未来方案**：用 Skill 机制注入更完整的工具使用指南（token 免费，可以不惜篇幅）。
 
-### 21.2 消息异步收发（Session Reconciliation）
+### 21.2 消息异步收发 ✅ 已通过架构重构解决
 
-> 新增：2026-02-22
+> 更新：2026-02-22
 
-#### 问题
+#### 原问题
 
-ClawBowl 使用 OpenAI 兼容的 `/v1/chat/completions` SSE 端点与 OpenClaw 通信。
-该端点是**同步模式**——请求和响应绑定在同一条 HTTP 长连接上。
+ClawBowl 早期使用 Backend 作为 SSE 代理，对话消息绑定在单条 HTTP 长连接上。
+App 关闭或网络中断时，SSE 连接断开，后端 DB 中只留下空的 assistant 记录。
+曾尝试通过 Session Reconciliation（`session_reconciler.py`）从 JSONL 回补，
+但增加了系统复杂度。
 
-当用户关闭 App 或网络中断时，SSE 连接断开，但 OpenClaw Agent 会继续执行任务。
-Agent 的最终回复写入了 OpenClaw 内部 session（JSONL 文件），但后端 DB 中只留下
-一条 `status=error` 的空 assistant 记录。用户重新打开 App 时看不到已完成的回复。
+#### 已实施方案：Gateway 直连架构
 
-对比 Telegram 等 Channel 插件的工作模式：收（webhook inbound）和发（Bot API outbound）
-是完全解耦的两条路径，不依赖持久连接。我们的 iOS App 本质是聊天应用，却用了开发
-工具的接口模式，这是体验缺陷的根源。
+V14 架构重构彻底解决了此问题：
 
-#### 解决方案：Session History Reconciliation
+1. **iOS App 直连 OpenClaw Gateway**（通过 nginx `/gw/{port}/` 反向代理），Backend 不再经手对话数据。
+2. **OpenClaw 原生 session 管理**：所有对话完整保存在 `agents/{id}/sessions/*.jsonl`，App 重连后可通过 Gateway 的 `sessions_history` API 获取完整历史。
+3. **iOS 本地持久化**：`MessageStore`（本地 SQLite）保存聊天记录，App 重启后即时可用。
+4. **Backend `chat_logs` 表降级为历史归档**：不再写入新消息，`session_reconciler.py` 已删除。
 
-不重写为完整的 Channel 插件（工作量过大），而是在现有架构上加一层**会话历史同步**：
+**已清理的代码**：
+- `backend/app/services/proxy.py`：800+ 行厚代理逻辑已清除，文件保留为空 stub
+- `backend/app/services/session_reconciler.py`：已删除
+- `backend/app/routers/chat_router.py`：移除 `POST /api/v2/chat` 端点、`_save_log`、`_logged_stream`
+- `backend/app/schemas.py`：移除 `ChatMessage`、`ChatRequest`
 
-```
-用户重新打开 App → /api/v2/chat/warmup
-                         │
-                         ▼
-               session_reconciler.reconcile()
-                         │
-            ┌────────────┴────────────┐
-            ▼                         ▼
-    读取 OpenClaw session JSONL    读取 DB 最近记录
-    (bind-mount 文件系统直读)       (chat_logs 表)
-            │                         │
-            └────────────┬────────────┘
-                         ▼
-                  对比时间戳/内容
-                         │
-                    有新消息？
-                   ╱         ╲
-                  是           否
-                  │            └→ 无操作
-                  ▼
-          补写到 chat_logs
-          (role=assistant, status=recovered)
-                  │
-                  ▼
-        /api/v2/chat/history 正常返回
-```
+#### 离线期间的消息恢复
 
-**关键设计决策**：
-
-| 决策 | 选择 | 理由 |
-|------|------|------|
-| 数据源 | 直读 JSONL 文件 | bind-mount 可访问，零网络开销，毫秒级 |
-| 触发时机 | warmup 端点 | App 启动时自动执行，用户无感 |
-| 状态标记 | `status=recovered` | 区分正常流式回复和事后补写 |
-| 前端改动 | 无 | recovered 消息通过现有 history API 正常返回 |
-
-**session JSONL 格式**（OpenClaw 内部）：
-```jsonl
-{"type":"message","id":"...","timestamp":"2026-02-21T05:18:37Z",
- "message":{"role":"assistant","content":[{"type":"text","text":"..."}]}}
-```
-
-**匹配逻辑**：
-1. 从 session JSONL 尾部向前扫描，找到最近的 assistant 消息
-2. 与 DB 中最后一条 assistant 记录比较
-3. 如果 session 中有更新内容且 DB 中对应记录为空/error → 补写
-
-#### 与方案 C（忙碌检测）的关系
-
-本方案解决"事后补回"问题（App 关闭期间 Agent 完成的任务）。
-后续还可在此基础上实现方案 C（Agent 忙碌时保存用户消息为 pending 状态，
-用户重连后可选择重发），两者互补。
+当用户关闭 App 期间 Agent 完成了任务，重新打开 App 时：
+- 可通过 OpenClaw 的 `sessions_history` API 获取完整历史（待 iOS 端实现）
+- 远期可通过 APNs 推送通知用户 Agent 已完成任务
 
 ### 21.3 Docker 容器能力限制
 
@@ -1985,8 +1967,8 @@ Tarz 的核心不是"跑 OpenClaw"。
 - 当前运行环境：Docker 容器，优先在容器内实现全功能
 
 **核心资产（不可替代）**：
-- iOS App（用户交互层 — 独占 App + APNs 推送）
-- 后端 API Gateway + proxy.py（控制层 — 运行时无关，容器/裸跑/MicroVM 切换不影响）
+- iOS App（用户交互层 — 独占 App + Gateway 直连 + APNs 推送）
+- 后端控制面 API（认证 / 编排 / warmup / 上传 / 备份 — 运行时无关，容器/裸跑/MicroVM 切换不影响）
 - 用户体系 + 数据库
 - 编排逻辑（当前 Docker SDK 管理，可抽象为 RuntimeBackend 接口）
 - 产品设计思路（极简前端 + 固定沙盒 + 持久记忆 + 成长型助手）
@@ -2052,13 +2034,14 @@ OpenClaw 已从 2.14 升级到 **2.19-2**，Docker 镜像已重建，容器能�
 
 | 组件 | 切换运行环境时的迁移成本 |
 |---|---|
-| iOS App 全部代码 | 零（完全不变） |
-| proxy.py 消息路由 | 零（HTTP API 不变） |
+| iOS App 全部代码 | 零（直连 Gateway，不变） |
+| Backend 控制面 API | 零（认证/编排/上传 API 不变） |
+| nginx 路由 | 低（`/gw/{port}/` 规则更新目标地址即可） |
 | 用户体系 + 数据库 | 零 |
 | instance_manager.py | 中（需实现新的 RuntimeBackend） |
 | 数据存储 | 低（bind mount → 目标方案的存储层） |
 
-**核心结论**：proxy.py 和 iOS App 完全不受运行环境影响。迁移成本集中在 `instance_manager` 编排层，可通过 `RuntimeBackend` 抽象接口最小化。这是"Backend 作为服务者"架构的优势——代理层与运行时解耦。
+**核心结论**：V14 架构（直连 Gateway + Backend 仅控制面）进一步降低了运行环境切换成本。iOS App 和 Backend 控制面完全不受运行环境影响。迁移成本集中在 `instance_manager` 编排层和 nginx 路由规则，可通过 `RuntimeBackend` 抽象接口最小化。
 
 ### 23.4 Tailscale 参数详细分析
 
@@ -2255,3 +2238,125 @@ OpenClaw 的 `browser` 工具内部使用 **Playwright** 驱动浏览器（非�
 | `tools.browser` 配置错误 | 2.19 不认识此 key | 移除，Chromium 在 PATH 中自动启用 browser 工具 | 2.19+ |
 | 容器内 crontab 不存在 | Docker 无 cron daemon | 引导 LLM 使用 OpenClaw 内置 cron 工具 | 所有版本 |
 | DB locked | 多个 uvicorn 进程同时操作 SQLite | 确保单一后端进程 + WAL 模式 | 后端 |
+
+---
+
+## 25. OpenClaw 原生 iOS 支持方案评估
+
+> 新增：2026-02-22
+
+### 25.1 背景
+
+OpenClaw 官方文档提供了多种客户端连接方式（Gateway HTTP API、WebSocket、Bonjour 发现、TUI、WebChat、Control UI）。当前 ClawBowl 采用 Gateway HTTP SSE 直连方案（V14 架构）。需要评估 OpenClaw 原生能力与当前设计的兼容性，以及是否应采用更多原生特性。
+
+### 25.2 当前设计 vs OpenClaw 原生能力对比
+
+| 维度 | OpenClaw 原生能力 | ClawBowl 当前实现 | 差距/冲突 |
+|------|-------------------|-------------------|-----------|
+| **通信协议** | HTTP SSE（`/v1/chat/completions`）+ WebSocket（`/ws`）| HTTP SSE 直连 Gateway | ✅ 一致。WebSocket 可作为备选通道 |
+| **Session 管理** | 多 session 支持（`sessions_list`/`sessions_spawn`/`sessions_send`/`sessions_history`）| 单 session（warmup 返回 `session_key`）| ⚠️ 当前仅用单 session，未充分利用多 session 能力 |
+| **设备认证** | Gateway Token + Device Pairing（全 scopes 权限）| Backend 生成 token 写入 `openclaw.json` + 自动配对 | ✅ 一致 |
+| **附件处理** | 消息 content 中嵌入 `image_url`（base64/URL）| 先上传到 workspace `media/inbound/`，再在消息中引用路径 | ⚠️ 非标准方式。OpenClaw 原生支持直接在消息中嵌入 base64 图片 |
+| **会话历史** | `sessions_history` API 从 JSONL 返回完整历史 | iOS MessageStore 本地存储 + Backend `chat_logs` 归档 | ⚠️ 未使用 `sessions_history` API，离线恢复能力缺失 |
+| **工具状态显示** | SSE `delta.tool_calls` 事件 | ChatService 客户端解析 `toolStatusMap` | ✅ 已实现 |
+| **取消请求** | 断开连接即取消（Gateway 感知） | `URLSession` task cancellation | ✅ 一致 |
+| **推送通知** | Hooks/Webhook + Polls 机制 | APNs（代码就绪，待配置 p8 Key） | ⚠️ 未使用 OpenClaw 原生 Hooks/Webhook |
+| **Bonjour 发现** | mDNS 自动发现局域网 OpenClaw 实例 | 不适用（云托管场景） | — 不适用 |
+| **多 Agent** | 支持多 Agent 路由（`agents_list`）| 单 Agent（`main`） | ✅ 当前单用户单 Agent 足够 |
+| **Memory API** | `memory_search`/`memory_get` | 未使用（记忆由 Agent 自治） | ✅ 符合零侵入原则 |
+
+### 25.3 关键冲突点与改进方向
+
+#### ① 附件处理方式不统一
+
+**当前**：上传文件到 Backend → 存入 workspace → 消息中引用路径
+**原生**：直接在 `/v1/chat/completions` 请求的 `content` 数组中嵌入 `image_url` 类型的 base64 数据
+
+**建议**：对图片类附件，改为 OpenClaw 原生的 base64 嵌入方式（通过 Gateway 直连通道发送）。对大文件（>10MB），保留当前的先上传再引用方式。
+
+#### ② 会话历史恢复未利用原生 API
+
+**当前**：iOS 仅依赖本地 MessageStore，App 卸载或换设备则丢失历史
+**原生**：`sessions_history` API 可从 OpenClaw 获取完整的服务端会话历史
+
+**建议**：在 App 启动时（warmup 后）调用 `sessions_history` 与本地 MessageStore 进行增量同步，确保离线期间的消息可恢复。
+
+#### ③ Hooks/Webhook 可用于实时推送
+
+**当前**：APNs 推送需要 Backend 轮询或 `alert_monitor` 监控
+**原生**：OpenClaw Hooks 可在特定事件（消息完成、cron 触发等）时回调 webhook
+
+**建议**：配置 OpenClaw Hooks 回调到 Backend，Backend 收到回调后转发 APNs。这比轮询更实时，且符合事件驱动架构。
+
+#### ④ WebSocket 通道可改善实时性
+
+**当前**：HTTP SSE 是单向流（服务端→客户端），发消息仍需单独 POST
+**原生**：WebSocket `/ws` 提供全双工实时通道
+
+**建议**：当前 SSE 方案工作正常，WebSocket 作为 Phase 2 优化项评估。优势在于减少连接建立开销、支持双向实时通信。
+
+### 25.4 Telegram 式 UI/UX 参考方案
+
+> 新增：2026-02-22
+
+#### 设计方向：双模混合 + Telegram 式交互
+
+OpenClaw 官方 API（`sessions_send` + `sessions_history` + Hooks）本质上就是 Telegram Channel 插件的通用化版本。两种方式不冲突，可以融合为最优方案：
+
+```
+前台活跃时：
+  iOS ──SSE 直连──→ Gateway（实时流式，逐字显示）
+       ←──────────
+
+后台/离线时：
+  iOS 关闭
+  Agent 完成任务 → Hooks 回调 → Backend → APNs → iPhone 通知栏
+  用户点击通知 → App 打开 → sessions_history 增量同步
+```
+
+这比纯 Telegram 模式更好 — Telegram 做不到逐字流式输出，但我们可以。同时继承 Telegram 的异步解耦优势。
+
+#### Telegram 功能参考清单
+
+**第一批（高收益 / 低工作量）：**
+
+| Telegram 特性 | ClawBowl 实现方案 | 涉及文件 | 与 OpenClaw API 的关系 |
+|---------------|-------------------|----------|----------------------|
+| 消息日期分隔条（今天/昨天/日期） | 按日期在消息列表中插入分隔条 | ChatView | 纯前端 |
+| 消息状态指示（✓✓→🔄→✅） | 发送中 → 处理中(thinking) → 完成 | MessageBubble | `session_status` API |
+| 长按消息菜单（复制/引用） | iOS contextMenu 增强 | MessageBubble | 纯前端 |
+| 向右滑动引用回复 | swipe gesture → 引用消息 | ChatView/ChatInputBar | 消息 content 中加引用 |
+| 附件面板（📷 相机 / 🖼 图库 / 📎 文件） | 重组 ChatInputBar 附件操作 | ChatInputBar | `image_url` base64（原生 API） |
+| 粘贴图片直接发送 | UIPasteboard 图片检测 + 预览 | ChatInputBar | 同上 |
+
+**第二批（中等收益 / 中等工作量，Phase 2）：**
+
+| Telegram 特性 | ClawBowl 实现方案 | 与 OpenClaw API 的关系 |
+|---------------|-------------------|----------------------|
+| 未读消息数 badge | App icon badge + Hooks 计数 | Hooks + `sessions_history` 差量 |
+| 链接预览（OG 元数据） | 检测 URL → 展示预览卡片 | `web_fetch` 可获取 OG 数据 |
+| 消息搜索 | 本地全文搜索 + memory_search | `memory_search` API |
+| 语音消息优化 | 波形显示 + 播放进度 | 纯前端 |
+
+**不采用的 Telegram 功能：**
+
+| Telegram 功能 | 不采用原因 |
+|---------------|-----------|
+| 消息编辑/撤回 | OpenClaw session JSONL 不支持修改历史 |
+| 表情回应（Reaction） | 单 Agent 对话场景价值低 |
+| 消息转发 | 无多对话/多用户场景 |
+| 已读/在线状态 | Agent 始终"在线" |
+
+### 25.5 综合优先级排序
+
+| 优先级 | 改进项 | 工作量 | 收益 | 类别 |
+|--------|--------|--------|------|------|
+| P0 | `sessions_history` API 恢复离线消息 | 低 | 高 | OpenClaw 原生 |
+| P0 | 消息日期分隔条 | 低 | 高 | Telegram UI |
+| P0 | 消息状态指示 | 低 | 中 | Telegram UI |
+| P0 | 长按消息菜单（复制/引用） | 低 | 中 | Telegram UI |
+| P1 | 向右滑动引用回复 | 中 | 中 | Telegram UI |
+| P1 | 附件面板重组 + 粘贴图片 | 中 | 中 | Telegram UI |
+| P1 | 图片附件改用原生 base64 嵌入 | 中 | 中 | OpenClaw 原生 |
+| P2 | Hooks/Webhook → APNs 推送 | 中 | 高 | OpenClaw 原生 |
+| P3 | WebSocket 通道评估 | 高 | 中 | OpenClaw 原生 |
