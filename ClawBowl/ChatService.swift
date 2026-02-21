@@ -71,7 +71,9 @@ actor ChatService {
             throw ChatError.serviceUnavailable
         }
 
-        let wsURL = URL(string: "\(apiBase)\(gwPath)/")!
+        let wsBase = apiBase.replacingOccurrences(of: "https://", with: "wss://")
+            .replacingOccurrences(of: "http://", with: "ws://")
+        let wsURL = URL(string: "\(wsBase)\(gwPath)/")!
         var request = URLRequest(url: wsURL)
         request.timeoutInterval = 30
 
