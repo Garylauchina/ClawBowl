@@ -196,9 +196,19 @@ enum MessageStore {
             return nil
         }
 
+        // Detect corrupted timestamps: old load() bug set all timestamps to Date(),
+        // then save() wrote them back. If all messages are within 2 seconds of each
+        // other, the data is corrupt — discard and let sessions_history resync.
+        if persisted.count > 2 {
+            let ts = persisted.map { $0.timestamp.timeIntervalSince1970 }
+            if let lo = ts.min(), let hi = ts.max(), (hi - lo) < 2.0 {
+                try? FileManager.default.removeItem(at: fileURL)
+                return nil
+            }
+        }
+
         return persisted.compactMap { p in
             guard let role = Message.Role(rawValue: p.role) else { return nil }
-            // 附件只保留标签文本，不恢复二进制数据
             let displayContent: String
             if let label = p.attachmentLabel, p.content.isEmpty {
                 displayContent = label
