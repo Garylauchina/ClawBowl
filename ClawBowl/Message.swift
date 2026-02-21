@@ -196,18 +196,25 @@ enum MessageStore {
             return nil
         }
 
-        // Detect corrupted timestamps: old load() bug set all timestamps to Date(),
-        // then save() wrote them back. If all messages are within 2 seconds of each
-        // other, the data is corrupt — discard and let sessions_history resync.
-        if persisted.count > 2 {
-            let ts = persisted.map { $0.timestamp.timeIntervalSince1970 }
+        // If all timestamps are within 2 seconds (corruption from old load() bug),
+        // redistribute them 5 minutes apart to preserve ordering without losing data.
+        var fixed = persisted
+        if fixed.count > 2 {
+            let ts = fixed.map { $0.timestamp.timeIntervalSince1970 }
             if let lo = ts.min(), let hi = ts.max(), (hi - lo) < 2.0 {
-                try? FileManager.default.removeItem(at: fileURL)
-                return nil
+                let base = lo - Double(fixed.count) * 300
+                fixed = fixed.enumerated().map { i, p in
+                    PersistedMessage(
+                        role: p.role,
+                        content: p.content,
+                        timestamp: Date(timeIntervalSince1970: base + Double(i) * 300),
+                        attachmentLabel: p.attachmentLabel
+                    )
+                }
             }
         }
 
-        return persisted.compactMap { p in
+        return fixed.compactMap { p in
             guard let role = Message.Role(rawValue: p.role) else { return nil }
             let displayContent: String
             if let label = p.attachmentLabel, p.content.isEmpty {

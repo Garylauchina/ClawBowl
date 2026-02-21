@@ -30,16 +30,25 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Session History Sync (OpenClaw native)
+    // MARK: - Session History Sync (from backend chat_logs)
 
-    /// Sync with OpenClaw session history to recover messages from offline period.
-    /// Called after warmup when gateway is configured.
+    /// Sync with backend chat_logs to recover historical messages.
+    /// Called on view appear. If local is empty, loads full history from server.
     func syncSessionHistory() {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let remote = try await ChatService.shared.fetchSessionHistory(limit: 50)
+                let remote = try await ChatService.shared.fetchSessionHistory(limit: 200)
                 guard !remote.isEmpty else { return }
+
+                if self.messages.isEmpty || (self.messages.count == 1 && self.messages.first?.role == .assistant) {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        self.messages = remote.sorted { $0.timestamp < $1.timestamp }
+                    }
+                    MessageStore.save(self.messages)
+                    self.scrollTrigger &+= 1
+                    return
+                }
 
                 let localTimestamps = self.messages.map { $0.timestamp.timeIntervalSince1970 }
 
@@ -61,7 +70,7 @@ final class ChatViewModel: ObservableObject {
                     self.scrollTrigger &+= 1
                 }
             } catch {
-                // Silent fail — history sync is best-effort
+                print("[HistorySync] failed: \(error)")
             }
         }
     }

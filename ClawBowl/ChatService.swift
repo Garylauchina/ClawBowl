@@ -289,65 +289,63 @@ actor ChatService {
         // is sufficient. No backend endpoint needed.
     }
 
-    // MARK: - Session History (OpenClaw native API)
+    // MARK: - Session History (from backend chat_logs)
 
-    /// 从 OpenClaw Gateway 获取会话历史（用于恢复离线期间的消息）
-    func fetchSessionHistory(limit: Int = 50) async throws -> [Message] {
-        guard let gwPath = gatewayPath, let gwToken = gatewayToken else {
-            throw ChatError.serviceUnavailable
+    /// 从后端 chat_logs 表恢复历史消息（POST /api/v2/chat/history）
+    func fetchSessionHistory(limit: Int = 200) async throws -> [Message] {
+        guard let token = await AuthService.shared.accessToken else {
+            throw ChatError.notAuthenticated
         }
-        guard let sk = sessionKey else { throw ChatError.serviceUnavailable }
-
-        guard let url = URL(string: "\(apiBase)\(gwPath)/api/sessions/\(sk)/history?limit=\(limit)") else {
+        guard let url = URL(string: "\(apiBase)/api/v2/chat/history") else {
             throw ChatError.invalidURL
         }
 
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(gwToken)", forHTTPHeaderField: "Authorization")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 15
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["limit": limit])
 
         let (data, response) = try await URLSession.shared.data(for: request)
         try validateHTTPResponse(response)
 
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["messages"] as? [[String: Any]] else {
             return []
         }
 
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let fallbackFormatter = ISO8601DateFormatter()
-        fallbackFormatter.formatOptions = [.withInternetDateTime]
+        let fmtFrac = DateFormatter()
+        fmtFrac.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
+        fmtFrac.timeZone = TimeZone(identifier: "UTC")
+        fmtFrac.locale = Locale(identifier: "en_US_POSIX")
 
-        return json.compactMap { entry -> Message? in
-            guard let msgObj = entry["message"] as? [String: Any],
-                  let role = msgObj["role"] as? String,
-                  role == "user" || role == "assistant" else { return nil }
+        let fmtPlain = DateFormatter()
+        fmtPlain.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        fmtPlain.timeZone = TimeZone(identifier: "UTC")
+        fmtPlain.locale = Locale(identifier: "en_US_POSIX")
 
-            var text = ""
-            if let content = msgObj["content"] as? String {
-                text = content
-            } else if let parts = msgObj["content"] as? [[String: Any]] {
-                text = parts.compactMap { part -> String? in
-                    if part["type"] as? String == "text" { return part["text"] as? String }
-                    return nil
-                }.joined()
-            }
-
-            guard !text.isEmpty else { return nil }
+        return items.compactMap { item -> Message? in
+            guard let role = item["role"] as? String,
+                  let content = item["content"] as? String,
+                  let status = item["status"] as? String,
+                  role == "user" || role == "assistant",
+                  status != "filtered",
+                  !content.isEmpty else { return nil }
 
             let ts: Date
-            if let tsStr = entry["timestamp"] as? String {
-                ts = isoFormatter.date(from: tsStr) ?? fallbackFormatter.date(from: tsStr) ?? Date()
+            if let tsStr = item["created_at"] as? String {
+                ts = fmtFrac.date(from: tsStr) ?? fmtPlain.date(from: tsStr) ?? Date()
             } else {
                 ts = Date()
             }
 
             return Message(
                 role: Message.Role(rawValue: role) ?? .assistant,
-                content: text,
+                content: content,
                 timestamp: ts,
-                status: .sent
+                status: status == "error" ? .error : .sent,
+                eventId: item["event_id"] as? String
             )
         }
     }

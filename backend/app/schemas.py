@@ -26,7 +26,7 @@ class TokenResponse(BaseModel):
 # ── Chat History ──────────────────────────────────────────────────────
 
 class ChatHistoryRequest(BaseModel):
-    limit: int = Field(default=30, ge=1, le=100)
+    limit: int = Field(default=30, ge=1, le=500)
     before: str | None = None
     after: str | None = None
 
