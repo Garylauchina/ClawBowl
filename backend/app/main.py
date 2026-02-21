@@ -57,11 +57,16 @@ async def lifespan(app: FastAPI):
     logger.info("Database: %s", settings.database_url)
     logger.info("OpenClaw port range: %d-%d", settings.openclaw_port_range_start, settings.openclaw_port_range_end)
 
-    # Background tasks disabled — single-user system, SQLite can't handle concurrent writers.
-    # idle_reaper / health_checker / alert_monitor all cause lock contention.
-    # TODO: re-enable with proper serialization or migrate to PostgreSQL if multi-user.
+    from app.services.alert_monitor import alert_monitor_loop
+    idle_task = asyncio.create_task(_idle_reaper())
+    health_task = asyncio.create_task(_health_checker())
+    alert_task = asyncio.create_task(alert_monitor_loop())
 
     yield
+
+    idle_task.cancel()
+    health_task.cancel()
+    alert_task.cancel()
     logger.info("ClawBowl Orchestrator shutting down")
 
 
