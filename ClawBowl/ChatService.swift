@@ -69,6 +69,8 @@ actor ChatService {
 
     // MARK: - WebSocket Connection
 
+    private var sessionDelegate: URLSessionDelegate?
+
     func connect() async throws {
         guard let gwPath = gatewayPath else {
             throw ChatError.serviceUnavailable
@@ -86,7 +88,9 @@ actor ChatService {
         var request = URLRequest(url: wsURL)
         request.timeoutInterval = 30
 
-        let session = URLSession(configuration: .default)
+        let delegate = GatewayTLSDelegate()
+        self.sessionDelegate = delegate
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
         let task = session.webSocketTask(with: request)
         self.wsTask = task
         task.resume()
@@ -595,6 +599,33 @@ enum ChatError: LocalizedError {
         case .notAuthenticated: return "请先登录"
         case .uploadFailed: return "附件上传失败，请重试"
         case .httpError(let code): return "请求失败 (\(code))"
+        }
+    }
+}
+
+// MARK: - TLS Delegate for direct-IP WebSocket
+
+/// Validates the server cert against the expected domain when connecting via IP.
+private final class GatewayTLSDelegate: NSObject, URLSessionDelegate {
+    private let expectedHost = "api.prometheusclothing.net"
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        let policy = SecPolicyCreateSSL(true, expectedHost as CFString)
+        SecTrustSetPolicies(trust, policy)
+        var error: CFError?
+        if SecTrustEvaluateWithError(trust, &error) {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
         }
     }
 }
