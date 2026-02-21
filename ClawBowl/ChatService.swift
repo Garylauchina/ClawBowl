@@ -125,7 +125,7 @@ actor ChatService {
 
         let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: privKeyData)
         let signature = try privateKey.signature(for: Data(signPayload.utf8))
-        let sigB64 = signature.rawRepresentation.base64URLEncodedString()
+        let sigB64 = signature.base64URLEncodedString()
 
         let connectParams: [String: Any] = [
             "type": "req",
