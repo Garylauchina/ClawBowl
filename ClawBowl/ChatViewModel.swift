@@ -30,50 +30,9 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Session History Sync (from backend chat_logs)
-
-    /// Sync with backend chat_logs to recover historical messages.
-    /// Called on view appear. If local is empty, loads full history from server.
-    func syncSessionHistory() {
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let remote = try await ChatService.shared.fetchSessionHistory(limit: 200)
-                guard !remote.isEmpty else { return }
-
-                if self.messages.isEmpty || (self.messages.count == 1 && self.messages.first?.role == .assistant) {
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        self.messages = remote.sorted { $0.timestamp < $1.timestamp }
-                    }
-                    MessageStore.save(self.messages)
-                    self.scrollTrigger &+= 1
-                    return
-                }
-
-                let localTimestamps = self.messages.map { $0.timestamp.timeIntervalSince1970 }
-
-                var newMessages: [Message] = []
-                for msg in remote {
-                    let ts = msg.timestamp.timeIntervalSince1970
-                    let isDuplicate = localTimestamps.contains(where: { abs($0 - ts) < 2 })
-                    if !isDuplicate {
-                        newMessages.append(msg)
-                    }
-                }
-
-                if !newMessages.isEmpty {
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        self.messages.append(contentsOf: newMessages)
-                        self.messages.sort { $0.timestamp < $1.timestamp }
-                    }
-                    MessageStore.save(self.messages)
-                    self.scrollTrigger &+= 1
-                }
-            } catch {
-                print("[HistorySync] failed: \(error)")
-            }
-        }
-    }
+    // Messages are persisted locally via MessageStore.
+    // On logout, MessageStore.clear() wipes the cache.
+    // History lives in OpenClaw session JSONL — no backend middleware needed.
 
     // MARK: - Ready Gate
 

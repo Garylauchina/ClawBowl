@@ -1,28 +1,20 @@
-"""Chat control endpoints – warmup and session management.
+"""Chat control endpoints – warmup only.
 
-Chat traffic now flows directly from the iOS app to the OpenClaw
-gateway via nginx (see /gw/{port}/ location block).  This router
-only handles control-plane operations:
-- GET  /chat/warmup  — start container, return gateway direct-connect info
-- POST /chat/cancel   — (legacy, kept for compat)
-- POST /chat/history  — merged history from chat_logs + JSONL session files
+Chat traffic flows directly from iOS app to OpenClaw gateway via nginx.
+This router only handles control-plane: warmup (start container, return
+gateway direct-connect info).
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import pathlib
-from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import ChatLog, OpenClawInstance, User
-from app.schemas import ChatHistoryRequest
+from app.models import User
 from app.services.instance_manager import instance_manager
 
 logger = logging.getLogger("clawbowl.chat")
@@ -30,20 +22,12 @@ logger = logging.getLogger("clawbowl.chat")
 router = APIRouter(prefix="/api/v2", tags=["chat"])
 
 
-# ── Endpoints ────────────────────────────────────────────────────────
-
 @router.post("/chat/warmup")
 async def warmup(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Pre-warm the user's OpenClaw container and return direct-connect info.
-
-    Called by the iOS SplashView so the container is ready when the
-    user reaches the ChatView.  Returns gateway URL and token for
-    the app to connect directly to the OpenClaw gateway via nginx,
-    bypassing the Python backend for chat traffic.
-    """
+    """Pre-warm the user's OpenClaw container and return direct-connect info."""
     instance = await instance_manager.ensure_running(user, db)
 
     return {
@@ -52,210 +36,3 @@ async def warmup(
         "gateway_token": instance.gateway_token,
         "session_key": f"clawbowl-{user.id}",
     }
-
-
-@router.post("/chat/cancel")
-async def cancel_chat(
-    user: User = Depends(get_current_user),
-):
-    """Legacy cancel endpoint — kept for backward compatibility.
-
-    With direct gateway connection, the iOS app cancels streams by
-    closing the URLSession connection.  This endpoint is a no-op.
-    """
-    return {"cancelled": False}
-
-
-@router.post("/chat/history")
-async def chat_history(
-    body: ChatHistoryRequest = ChatHistoryRequest(),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Merged chat history: chat_logs (old) + JSONL session files (new)."""
-
-    # 1. chat_logs (pre-V14)
-    stmt = (
-        select(ChatLog)
-        .where(ChatLog.user_id == user.id)
-        .where(ChatLog.status.notin_(["filtered"]))
-    )
-    if body.before:
-        try:
-            ts = datetime.fromisoformat(body.before)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid 'before' timestamp")
-        stmt = stmt.where(ChatLog.created_at < ts)
-    if body.after:
-        try:
-            ts = datetime.fromisoformat(body.after)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid 'after' timestamp")
-        stmt = stmt.where(ChatLog.created_at > ts)
-
-    stmt = stmt.order_by(ChatLog.created_at.desc()).limit(body.limit + 1)
-    result = await db.execute(stmt)
-    rows = result.scalars().all()
-
-    has_more = len(rows) > body.limit
-    rows = rows[: body.limit]
-    rows.reverse()
-
-    messages = []
-    seen_ts = set()
-    for r in rows:
-        ts_iso = r.created_at.isoformat() if r.created_at else None
-        messages.append({
-            "id": r.id,
-            "event_id": r.event_id,
-            "role": r.role,
-            "content": r.content,
-            "thinking_text": r.thinking_text,
-            "status": r.status,
-            "created_at": ts_iso,
-            "attachment_paths": json.loads(r.attachment_paths) if r.attachment_paths else None,
-        })
-        if ts_iso:
-            seen_ts.add(ts_iso[:19])
-
-    # 2. JSONL session files (post-V14 direct gateway messages)
-    inst_result = await db.execute(
-        select(OpenClawInstance).where(OpenClawInstance.user_id == user.id)
-    )
-    inst = inst_result.scalar_one_or_none()
-    if inst:
-        jsonl_msgs = _read_jsonl_sessions(inst.data_path, seen_ts, body.limit)
-        messages.extend(jsonl_msgs)
-
-    messages.sort(key=lambda m: m.get("created_at") or "")
-    if len(messages) > body.limit:
-        has_more = True
-        messages = messages[-body.limit:]
-
-    return {"messages": messages, "has_more": has_more}
-
-
-def _read_jsonl_sessions(
-    data_path: str, seen_ts: set[str], limit: int
-) -> list[dict]:
-    """Read user/assistant messages from user-chat JSONL session files only."""
-    sessions_dir = pathlib.Path(data_path) / "config" / "agents" / "main" / "sessions"
-    if not sessions_dir.is_dir():
-        return []
-
-    user_session_ids = _get_user_session_ids(sessions_dir)
-
-    results = []
-    for jf in sessions_dir.glob("*.jsonl"):
-        sid = jf.stem
-        if user_session_ids is not None and sid not in user_session_ids:
-            continue
-        try:
-            file_msgs = _parse_one_jsonl(jf, seen_ts)
-            results.extend(file_msgs)
-        except Exception:
-            logger.debug("Failed to read JSONL %s", jf, exc_info=True)
-            continue
-
-    results.sort(key=lambda m: m.get("created_at") or "")
-    return results
-
-
-_SYSTEM_KEY_PATTERNS = ("cron:", "hook:", "tui-test", "test-busy")
-_SYSTEM_CONTENT_PREFIXES = (
-    "Read HEARTBEAT",
-    "[Chat messages since",
-    "Continue where you left off",
-    "[System note:",
-)
-
-
-def _parse_one_jsonl(
-    jf: pathlib.Path, seen_ts: set[str]
-) -> list[dict]:
-    """Parse one JSONL file. Returns empty list if it's a system session."""
-    msgs_buf = []
-    is_system = False
-
-    with open(jf) as fh:
-        for line in fh:
-            entry = json.loads(line)
-            if entry.get("type") != "message":
-                continue
-            msg = entry.get("message", {})
-            role = msg.get("role")
-            if role not in ("user", "assistant"):
-                continue
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = "".join(
-                    p.get("text", "")
-                    for p in content
-                    if p.get("type") == "text"
-                )
-            if not content or not isinstance(content, str):
-                continue
-
-            # Detect system session by first user message
-            if role == "user" and not msgs_buf:
-                if any(content.startswith(p) for p in _SYSTEM_CONTENT_PREFIXES):
-                    return []
-
-            # Skip injected context even in user sessions
-            if any(content.startswith(p) for p in _SYSTEM_CONTENT_PREFIXES):
-                continue
-
-            ts_str = entry.get("timestamp", "")
-            if ts_str[:19] in seen_ts:
-                continue
-
-            ts_iso = _normalize_ts(ts_str)
-            msgs_buf.append({
-                "id": entry.get("id", ""),
-                "event_id": None,
-                "role": role,
-                "content": content,
-                "thinking_text": None,
-                "status": "success",
-                "created_at": ts_iso,
-                "attachment_paths": None,
-            })
-
-    return msgs_buf
-
-
-def _get_user_session_ids(sessions_dir: pathlib.Path) -> set[str] | None:
-    """Return set of session IDs that belong to user chat (not system).
-
-    Reads sessions.json to map key -> sessionId, then filters out
-    system sessions (cron, hook, heartbeat, test).
-    Returns None if sessions.json is unreadable (fallback: read all).
-    """
-    sj = sessions_dir / "sessions.json"
-    try:
-        with open(sj) as f:
-            data = json.load(f)
-    except Exception:
-        return None
-
-    user_ids: set[str] = set()
-    for key, val in data.items():
-        if key == "agent:main:main":
-            continue
-        if any(p in key for p in _SYSTEM_KEY_PATTERNS):
-            continue
-        sid = val.get("sessionId")
-        if sid:
-            user_ids.add(sid)
-    return user_ids
-
-
-def _normalize_ts(ts: str) -> str:
-    """Convert '2026-02-21T04:03:39.062Z' to '2026-02-21T04:03:39.062000'."""
-    if ts.endswith("Z"):
-        ts = ts[:-1]
-    if "." in ts:
-        base, frac = ts.rsplit(".", 1)
-        frac = frac.ljust(6, "0")[:6]
-        return f"{base}.{frac}"
-    return ts

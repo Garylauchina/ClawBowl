@@ -176,9 +176,6 @@ struct ChatView: View {
                     avatarMenu
                 }
             }
-            .task {
-                viewModel.syncSessionHistory()
-            }
             .sheet(isPresented: $showCronView) {
                 CronView()
             }

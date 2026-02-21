@@ -289,66 +289,8 @@ actor ChatService {
         // is sufficient. No backend endpoint needed.
     }
 
-    // MARK: - Session History (from backend chat_logs)
-
-    /// 从后端 chat_logs 表恢复历史消息（POST /api/v2/chat/history）
-    func fetchSessionHistory(limit: Int = 200) async throws -> [Message] {
-        guard let token = await AuthService.shared.accessToken else {
-            throw ChatError.notAuthenticated
-        }
-        guard let url = URL(string: "\(apiBase)/api/v2/chat/history") else {
-            throw ChatError.invalidURL
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 15
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["limit": limit])
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validateHTTPResponse(response)
-
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let items = json["messages"] as? [[String: Any]] else {
-            return []
-        }
-
-        let fmtFrac = DateFormatter()
-        fmtFrac.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
-        fmtFrac.timeZone = TimeZone(identifier: "UTC")
-        fmtFrac.locale = Locale(identifier: "en_US_POSIX")
-
-        let fmtPlain = DateFormatter()
-        fmtPlain.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
-        fmtPlain.timeZone = TimeZone(identifier: "UTC")
-        fmtPlain.locale = Locale(identifier: "en_US_POSIX")
-
-        return items.compactMap { item -> Message? in
-            guard let role = item["role"] as? String,
-                  let content = item["content"] as? String,
-                  let status = item["status"] as? String,
-                  role == "user" || role == "assistant",
-                  status != "filtered",
-                  !content.isEmpty else { return nil }
-
-            let ts: Date
-            if let tsStr = item["created_at"] as? String {
-                ts = fmtFrac.date(from: tsStr) ?? fmtPlain.date(from: tsStr) ?? Date()
-            } else {
-                ts = Date()
-            }
-
-            return Message(
-                role: Message.Role(rawValue: role) ?? .assistant,
-                content: content,
-                timestamp: ts,
-                status: status == "error" ? .error : .sent,
-                eventId: item["event_id"] as? String
-            )
-        }
-    }
+    // History is handled by local MessageStore persistence.
+    // On logout MessageStore.clear() wipes the cache, new session starts fresh.
 
     // MARK: - Session management
 
