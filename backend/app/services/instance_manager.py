@@ -24,7 +24,6 @@ from app.services.config_generator import (
     write_config,
 )
 from app.services.port_allocator import allocate_port
-from app.subscriptions.tier import get_tier
 
 logger = logging.getLogger("clawbowl.instance_manager")
 
@@ -260,8 +259,6 @@ class InstanceManager:
         db.add(instance)
         await db.flush()
 
-        # Start Docker container
-        tier = get_tier(user.subscription_tier)
         container = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: _get_docker().containers.run(
@@ -280,8 +277,8 @@ class InstanceManager:
                     "NODE_OPTIONS": f"--max-old-space-size={settings.openclaw_node_max_old_space}",
                     "OPENCLAW_STATE_DIR": "/data/config",
                 },
-                mem_limit=tier.container_memory,
-                cpu_quota=int(tier.container_cpus * 100000),
+                mem_limit=settings.openclaw_container_memory,
+                cpu_quota=int(settings.openclaw_container_cpus * 100000),
                 cpu_period=100000,
                 restart_policy={"Name": "unless-stopped"},
                 detach=True,

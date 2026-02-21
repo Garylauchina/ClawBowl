@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import Base, engine
-from app.routers import admin_router, auth_router, chat_router, cron_router, file_router, instance_router, notification_router
+from app.routers import auth_router, chat_router, cron_router, file_router, instance_router, notification_router
 from app.services.instance_manager import instance_manager
 
 logging.basicConfig(
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="ClawBowl Orchestrator",
-    description="Multi-tenant OpenClaw instance orchestrator for ClawBowl chat app",
+    description="Single-user OpenClaw instance orchestrator",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -95,7 +95,6 @@ app.include_router(file_router.router)
 app.include_router(instance_router.router)
 app.include_router(cron_router.router)
 app.include_router(notification_router.router)
-app.include_router(admin_router.router)
 
 
 @app.get("/healthz")

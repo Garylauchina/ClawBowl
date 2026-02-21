@@ -23,14 +23,6 @@ class TokenResponse(BaseModel):
     user_id: str
 
 
-# ── Chat History ──────────────────────────────────────────────────────
-
-class ChatHistoryRequest(BaseModel):
-    limit: int = Field(default=30, ge=1, le=500)
-    before: str | None = None
-    after: str | None = None
-
-
 # ── Instance ──────────────────────────────────────────────────────────
 
 class InstanceStatusResponse(BaseModel):

@@ -59,7 +59,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 
 // MARK: - Startup Controller
 
-/// 启动控制器：管理后端初始化流程，将进度反馈给前端
 @MainActor
 class StartupController: ObservableObject {
     @Published var isReady = false
@@ -67,117 +66,55 @@ class StartupController: ObservableObject {
 
     private var hasStarted = false
 
-    /// 由 SplashView.onAppear 调用 — 欢迎屏已经显示后才开始后端工作
     func beginStartup() {
         guard !hasStarted else { return }
         hasStarted = true
 
         Task {
-            // ① 检查登录状态
-            progressText = "正在检查登录状态..."
-            await smallDelay(0.3)
-
-            let hasToken = AuthService.shared.accessToken != nil
-
-            if hasToken {
-                // ② 刷新 Token
-                progressText = "正在验证身份..."
-                await refreshTokenQuiet()
-
-                // ③ 预热容器
+            if AuthService.shared.accessToken != nil {
                 progressText = "正在启动 AI 引擎..."
-                await warmupContainerQuiet()
-
-                // ④ 准备聊天服务
-                progressText = "正在准备聊天服务..."
-                await smallDelay(0.3)
-            } else {
-                // 未登录，跳过后端预热
-                progressText = "准备登录界面..."
-                await smallDelay(0.5)
+                try? await AuthService.shared.refreshToken()
+                await warmup()
             }
-
-            // ⑤ 完成
-            progressText = "准备就绪！"
-            await smallDelay(0.4)
-
-            withAnimation(.easeInOut(duration: 0.3)) {
-                isReady = true
-            }
+            withAnimation(.easeInOut(duration: 0.3)) { isReady = true }
         }
     }
 
-    // MARK: - Private
-
-    /// 刷新 Token（2 秒超时，失败静默跳过）
-    private func refreshTokenQuiet() async {
-        await withTimeLimit(seconds: 2) {
-            try? await AuthService.shared.refreshToken()
-        }
-    }
-
-    /// ChatView 出现时调用——若 ChatService 尚未配置，补发 warmup 并通知
     func ensureWarmup() {
         Task {
             let configured = await ChatService.shared.isConfigured
             guard !configured else { return }
-            await warmupContainerQuiet()
-            let nowConfigured = await ChatService.shared.isConfigured
-            if nowConfigured {
+            await warmup()
+            if await ChatService.shared.isConfigured {
                 NotificationCenter.default.post(name: .chatServiceReady, object: nil)
             }
         }
     }
 
-    /// 预热后端容器，获取 Gateway + 设备认证信息，建立 WebSocket 连接
-    private func warmupContainerQuiet() async {
+    private func warmup() async {
         guard let token = AuthService.shared.accessToken,
-              let url = URL(string: "https://prometheusclothing.net/api/v2/chat/warmup") else {
-            return
-        }
+              let url = URL(string: "https://prometheusclothing.net/api/v2/chat/warmup") else { return }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 15
 
-        await withTimeLimit(seconds: 15) {
-            guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let gwURL = json["gateway_url"] as? String,
-                  let gwToken = json["gateway_token"] as? String,
-                  let sessKey = json["session_key"] as? String,
-                  let devId = json["device_id"] as? String,
-                  let devPub = json["device_public_key"] as? String,
-                  let devPriv = json["device_private_key"] as? String else {
-                return
-            }
-            await ChatService.shared.configure(
-                gatewayURL: gwURL,
-                gatewayToken: gwToken,
-                sessionKey: sessKey,
-                devicePrivateKey: devPriv,
-                devicePublicKey: devPub,
-                deviceId: devId
-            )
-            try? await ChatService.shared.connect()
-        }
-    }
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let gwURL = json["gateway_url"] as? String,
+              let gwToken = json["gateway_token"] as? String,
+              let sessKey = json["session_key"] as? String,
+              let devId = json["device_id"] as? String,
+              let devPub = json["device_public_key"] as? String,
+              let devPriv = json["device_private_key"] as? String else { return }
 
-    /// 执行一个异步操作，但最多等待指定秒数
-    private func withTimeLimit(seconds: Double, operation: @escaping () async -> Void) async {
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { await operation() }
-            group.addTask { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
-            // 第一个完成的就返回（操作完成或超时）
-            await group.next()
-            group.cancelAll()
-        }
-    }
-
-    private func smallDelay(_ seconds: Double) async {
-        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        await ChatService.shared.configure(
+            gatewayURL: gwURL, gatewayToken: gwToken, sessionKey: sessKey,
+            devicePrivateKey: devPriv, devicePublicKey: devPub, deviceId: devId
+        )
+        try? await ChatService.shared.connect()
     }
 }
 
