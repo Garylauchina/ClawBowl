@@ -138,65 +138,116 @@ async def chat_history(
 def _read_jsonl_sessions(
     data_path: str, seen_ts: set[str], limit: int
 ) -> list[dict]:
-    """Read user/assistant messages from all JSONL session files."""
+    """Read user/assistant messages from user-chat JSONL session files only."""
     sessions_dir = pathlib.Path(data_path) / "config" / "agents" / "main" / "sessions"
     if not sessions_dir.is_dir():
         return []
 
+    user_session_ids = _get_user_session_ids(sessions_dir)
+
     results = []
     for jf in sessions_dir.glob("*.jsonl"):
-        if jf.name == "sessions.json":
+        sid = jf.stem
+        if user_session_ids is not None and sid not in user_session_ids:
             continue
         try:
-            with open(jf) as fh:
-                for line in fh:
-                    entry = json.loads(line)
-                    if entry.get("type") != "message":
-                        continue
-                    msg = entry.get("message", {})
-                    role = msg.get("role")
-                    if role not in ("user", "assistant"):
-                        continue
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        content = "".join(
-                            p.get("text", "")
-                            for p in content
-                            if p.get("type") == "text"
-                        )
-                    if not content or not isinstance(content, str):
-                        continue
-                    # Skip system-injected context messages
-                    if content.startswith("[Chat messages since"):
-                        continue
-                    if content.startswith("Read HEARTBEAT"):
-                        continue
-                    if content.startswith("Continue where you left off"):
-                        continue
-
-                    ts_str = entry.get("timestamp", "")
-                    # Dedup against chat_logs by timestamp prefix
-                    if ts_str[:19] in seen_ts:
-                        continue
-
-                    ts_iso = _normalize_ts(ts_str)
-
-                    results.append({
-                        "id": entry.get("id", ""),
-                        "event_id": None,
-                        "role": role,
-                        "content": content,
-                        "thinking_text": None,
-                        "status": "success",
-                        "created_at": ts_iso,
-                        "attachment_paths": None,
-                    })
+            file_msgs = _parse_one_jsonl(jf, seen_ts)
+            results.extend(file_msgs)
         except Exception:
             logger.debug("Failed to read JSONL %s", jf, exc_info=True)
             continue
 
     results.sort(key=lambda m: m.get("created_at") or "")
     return results
+
+
+_SYSTEM_KEY_PATTERNS = ("cron:", "hook:", "tui-test", "test-busy")
+_SYSTEM_CONTENT_PREFIXES = (
+    "Read HEARTBEAT",
+    "[Chat messages since",
+    "Continue where you left off",
+    "[System note:",
+)
+
+
+def _parse_one_jsonl(
+    jf: pathlib.Path, seen_ts: set[str]
+) -> list[dict]:
+    """Parse one JSONL file. Returns empty list if it's a system session."""
+    msgs_buf = []
+    is_system = False
+
+    with open(jf) as fh:
+        for line in fh:
+            entry = json.loads(line)
+            if entry.get("type") != "message":
+                continue
+            msg = entry.get("message", {})
+            role = msg.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = "".join(
+                    p.get("text", "")
+                    for p in content
+                    if p.get("type") == "text"
+                )
+            if not content or not isinstance(content, str):
+                continue
+
+            # Detect system session by first user message
+            if role == "user" and not msgs_buf:
+                if any(content.startswith(p) for p in _SYSTEM_CONTENT_PREFIXES):
+                    return []
+
+            # Skip injected context even in user sessions
+            if any(content.startswith(p) for p in _SYSTEM_CONTENT_PREFIXES):
+                continue
+
+            ts_str = entry.get("timestamp", "")
+            if ts_str[:19] in seen_ts:
+                continue
+
+            ts_iso = _normalize_ts(ts_str)
+            msgs_buf.append({
+                "id": entry.get("id", ""),
+                "event_id": None,
+                "role": role,
+                "content": content,
+                "thinking_text": None,
+                "status": "success",
+                "created_at": ts_iso,
+                "attachment_paths": None,
+            })
+
+    return msgs_buf
+
+
+def _get_user_session_ids(sessions_dir: pathlib.Path) -> set[str] | None:
+    """Return set of session IDs that belong to user chat (not system).
+
+    Reads sessions.json to map key -> sessionId, then filters out
+    system sessions (cron, hook, heartbeat, test).
+    Returns None if sessions.json is unreadable (fallback: read all).
+    """
+    sj = sessions_dir / "sessions.json"
+    try:
+        with open(sj) as f:
+            data = json.load(f)
+    except Exception:
+        return None
+
+    user_ids: set[str] = set()
+    for key, val in data.items():
+        if key == "agent:main:main":
+            continue
+        if any(p in key for p in _SYSTEM_KEY_PATTERNS):
+            continue
+        sid = val.get("sessionId")
+        if sid:
+            user_ids.add(sid)
+    return user_ids
 
 
 def _normalize_ts(ts: str) -> str:
