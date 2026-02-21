@@ -273,7 +273,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = ClawBowl;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSAppTransportSecurity_AllowsArbitraryLoads = NO;
+				INFOPLIST_KEY_NSAppTransportSecurity_AllowsArbitraryLoads = YES;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "ClawBowl 需要使用麦克风进行语音输入";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "ClawBowl 需要语音识别功能将语音转为文字";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -309,7 +309,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = ClawBowl;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSAppTransportSecurity_AllowsArbitraryLoads = NO;
+				INFOPLIST_KEY_NSAppTransportSecurity_AllowsArbitraryLoads = YES;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "ClawBowl 需要使用麦克风进行语音输入";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "ClawBowl 需要语音识别功能将语音转为文字";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
