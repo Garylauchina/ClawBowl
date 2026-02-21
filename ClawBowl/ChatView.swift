@@ -156,23 +156,6 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    // "Load older" indicator at top
-                    if viewModel.hasOlderMessages {
-                        Group {
-                            if viewModel.isLoadingHistory {
-                                ProgressView()
-                                    .padding(.vertical, 12)
-                            } else {
-                                Color.clear
-                                    .frame(height: 1)
-                                    .onAppear {
-                                        Task { await viewModel.loadOlderMessages() }
-                                    }
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-
                     ForEach(viewModel.messages) { message in
                         MessageBubble(message: message)
                             .id(message.id)
@@ -190,7 +173,6 @@ struct ChatView: View {
             .scrollDismissesKeyboard(.immediately)
             .onAppear {
                 scrollProxy = proxy
-                viewModel.loadInitialHistory()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     if let lastID = viewModel.messages.last?.id {
                         proxy.scrollTo(lastID, anchor: .bottom)

@@ -1802,11 +1802,13 @@ backend/templates/
 
 ### 第二优先级：收尾工作（容器化功能验证完成后）
 
-1. **基础 Snapshot 备份**（tar.zst + manifest，数据安全网）
-2. **用户初始配置文件集落地**（详见第 19 章）
-3. **APNs 推送**（代码已完成，待 Apple Developer Console 创建 p8 Key）
-4. **Cron 任务手动编辑/删除**
-5. **推荐指令库集成**（2000 条指令）
+0. **消息异步收发**（Session Reconciliation，详见 21.2 节）← 当前进行中
+1. **配置自动同步**（`_sync_config` — 模板更新自动应用到现有用户）✅ 已完成
+2. **基础 Snapshot 备份**（tar.zst + manifest，数据安全网）
+3. **用户初始配置文件集落地**（详见第 19 章）
+4. **APNs 推送**（代码已完成，待 Apple Developer Console 创建 p8 Key）
+5. **Cron 任务手动编辑/删除**
+6. **推荐指令库集成**（2000 条指令）
 
 ### 后续规划
 
@@ -1887,7 +1889,81 @@ backend/templates/
 
 **未来方案**：考虑用 Skill 机制注入更完整的工具使用指南（token 免费，可以不惜篇幅）。
 
-### 21.2 Docker 容器能力限制
+### 21.2 消息异步收发（Session Reconciliation）
+
+> 新增：2026-02-22
+
+#### 问题
+
+ClawBowl 使用 OpenAI 兼容的 `/v1/chat/completions` SSE 端点与 OpenClaw 通信。
+该端点是**同步模式**——请求和响应绑定在同一条 HTTP 长连接上。
+
+当用户关闭 App 或网络中断时，SSE 连接断开，但 OpenClaw Agent 会继续执行任务。
+Agent 的最终回复写入了 OpenClaw 内部 session（JSONL 文件），但后端 DB 中只留下
+一条 `status=error` 的空 assistant 记录。用户重新打开 App 时看不到已完成的回复。
+
+对比 Telegram 等 Channel 插件的工作模式：收（webhook inbound）和发（Bot API outbound）
+是完全解耦的两条路径，不依赖持久连接。我们的 iOS App 本质是聊天应用，却用了开发
+工具的接口模式，这是体验缺陷的根源。
+
+#### 解决方案：Session History Reconciliation
+
+不重写为完整的 Channel 插件（工作量过大），而是在现有架构上加一层**会话历史同步**：
+
+```
+用户重新打开 App → /api/v2/chat/warmup
+                         │
+                         ▼
+               session_reconciler.reconcile()
+                         │
+            ┌────────────┴────────────┐
+            ▼                         ▼
+    读取 OpenClaw session JSONL    读取 DB 最近记录
+    (bind-mount 文件系统直读)       (chat_logs 表)
+            │                         │
+            └────────────┬────────────┘
+                         ▼
+                  对比时间戳/内容
+                         │
+                    有新消息？
+                   ╱         ╲
+                  是           否
+                  │            └→ 无操作
+                  ▼
+          补写到 chat_logs
+          (role=assistant, status=recovered)
+                  │
+                  ▼
+        /api/v2/chat/history 正常返回
+```
+
+**关键设计决策**：
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 数据源 | 直读 JSONL 文件 | bind-mount 可访问，零网络开销，毫秒级 |
+| 触发时机 | warmup 端点 | App 启动时自动执行，用户无感 |
+| 状态标记 | `status=recovered` | 区分正常流式回复和事后补写 |
+| 前端改动 | 无 | recovered 消息通过现有 history API 正常返回 |
+
+**session JSONL 格式**（OpenClaw 内部）：
+```jsonl
+{"type":"message","id":"...","timestamp":"2026-02-21T05:18:37Z",
+ "message":{"role":"assistant","content":[{"type":"text","text":"..."}]}}
+```
+
+**匹配逻辑**：
+1. 从 session JSONL 尾部向前扫描，找到最近的 assistant 消息
+2. 与 DB 中最后一条 assistant 记录比较
+3. 如果 session 中有更新内容且 DB 中对应记录为空/error → 补写
+
+#### 与方案 C（忙碌检测）的关系
+
+本方案解决"事后补回"问题（App 关闭期间 Agent 完成的任务）。
+后续还可在此基础上实现方案 C（Agent 忙碌时保存用户消息为 pending 状态，
+用户重连后可选择重发），两者互补。
+
+### 21.3 Docker 容器能力限制
 
 > 详见第 23 章完整的容器能力评估、Tailscale 参数分析、以及远期备选方案。
 >

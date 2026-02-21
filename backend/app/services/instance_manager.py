@@ -18,7 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import async_session
 from app.models import OpenClawInstance, User
-from app.services.config_generator import generate_gateway_token, write_config
+from app.services.config_generator import (
+    generate_gateway_token,
+    read_hooks_token,
+    write_config,
+)
 from app.services.port_allocator import allocate_port
 from app.subscriptions.tier import get_tier
 
@@ -293,12 +297,43 @@ class InstanceManager:
         # Auto-approve gateway device pairing so cron/gateway tools work
         await self._auto_approve_pairing(config_dir)
 
+        # Make session files readable by the backend for reconciliation
+        await self._fix_session_permissions(config_dir)
+
         logger.info("Created instance %s on port %d for user %s", container_name, port, user.id)
         return instance
+
+    async def _sync_config(self, instance: OpenClawInstance, db: AsyncSession) -> None:
+        """Re-render openclaw.json from the latest template while preserving
+        user-specific runtime values (hooks_token).
+
+        Called before every start / restart so that template changes (new
+        features, security fixes, model updates) are automatically picked up
+        by existing users without requiring a full container re-creation.
+        """
+        config_dir = Path(instance.config_path)
+        user_result = await db.execute(
+            select(User).where(User.id == instance.user_id)
+        )
+        user = user_result.scalar_one()
+
+        existing_hooks_token = read_hooks_token(config_dir)
+        write_config(
+            user,
+            instance.gateway_token,
+            config_dir,
+            hooks_token=existing_hooks_token,
+        )
+        logger.info(
+            "Synced config from template for %s (hooks_token preserved: %s)",
+            instance.container_name,
+            existing_hooks_token is not None,
+        )
 
     async def _start_instance(self, instance: OpenClawInstance, db: AsyncSession) -> None:
         """Start a stopped container."""
         try:
+            await self._sync_config(instance, db)
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: _get_docker().containers.get(instance.container_name).start(),
@@ -321,6 +356,7 @@ class InstanceManager:
     async def _restart_instance(self, instance: OpenClawInstance, db: AsyncSession) -> None:
         """Restart a container."""
         try:
+            await self._sync_config(instance, db)
             await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: _get_docker().containers.get(instance.container_name).restart(timeout=10),
@@ -397,6 +433,28 @@ class InstanceManager:
             except Exception:
                 logger.debug("Pairing auto-approve attempt %d failed", attempt + 1)
         logger.warning("No pending pairing requests found after %d attempts", retries)
+
+    @staticmethod
+    async def _fix_session_permissions(config_dir: Path) -> None:
+        """Ensure OpenClaw session files are readable by the backend process.
+
+        Uses ``sudo chmod`` since the files are owned by root (container).
+        The entrypoint.sh ``umask 0022`` handles new files; this fixes old ones.
+        """
+        import subprocess
+
+        agents_dir = config_dir / "agents"
+        if agents_dir.exists():
+            try:
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: subprocess.run(
+                        ["sudo", "chmod", "-R", "o+rX", str(agents_dir)],
+                        timeout=5, capture_output=True,
+                    ),
+                )
+            except Exception:
+                pass
 
     async def _wait_for_ready(self, instance: OpenClawInstance, timeout: int = 30) -> None:
         """Poll the gateway until it responds or timeout."""

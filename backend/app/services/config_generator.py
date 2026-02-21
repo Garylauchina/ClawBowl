@@ -35,14 +35,25 @@ def generate_gateway_token() -> str:
     return secrets.token_hex(24)
 
 
-def render_config(user: User, gateway_token: str) -> dict:
-    """Render a full openclaw.json dict for the given user."""
+def render_config(
+    user: User,
+    gateway_token: str,
+    *,
+    hooks_token: str | None = None,
+) -> dict:
+    """Render a full openclaw.json dict for the given user.
+
+    If *hooks_token* is provided it is reused; otherwise a fresh one is
+    generated.  Passing the existing token avoids invalidating active webhook
+    sessions when the config is re-synced from updated templates.
+    """
     tier = get_tier(user.subscription_tier)
     api_key = get_zenmux_key_for_tier(tier, settings.zenmux_api_key)
 
     raw = _load_template(tier.template)
 
-    hooks_token = secrets.token_hex(24)
+    if hooks_token is None:
+        hooks_token = secrets.token_hex(24)
 
     raw = raw.replace("{{ ZENMUX_API_KEY }}", api_key)
     raw = raw.replace("{{ MAX_TOKENS }}", str(tier.max_tokens))
@@ -53,10 +64,32 @@ def render_config(user: User, gateway_token: str) -> dict:
     return json.loads(raw)
 
 
-def write_config(user: User, gateway_token: str, dest_dir: Path) -> Path:
-    """Write openclaw.json to *dest_dir* and return the file path."""
+def write_config(
+    user: User,
+    gateway_token: str,
+    dest_dir: Path,
+    *,
+    hooks_token: str | None = None,
+) -> Path:
+    """Write openclaw.json to *dest_dir* and return the file path.
+
+    Passes *hooks_token* through to :func:`render_config` so that
+    existing tokens can be preserved across config re-syncs.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    config = render_config(user, gateway_token)
+    config = render_config(user, gateway_token, hooks_token=hooks_token)
     config_path = dest_dir / "openclaw.json"
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     return config_path
+
+
+def read_hooks_token(config_dir: Path) -> str | None:
+    """Extract the hooks token from an existing openclaw.json, or *None*."""
+    config_path = config_dir / "openclaw.json"
+    if not config_path.exists():
+        return None
+    try:
+        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        return cfg.get("hooks", {}).get("token")
+    except (json.JSONDecodeError, OSError):
+        return None

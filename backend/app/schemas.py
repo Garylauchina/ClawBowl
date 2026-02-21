@@ -2,8 +2,6 @@
 
 from datetime import datetime
 
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 
@@ -23,19 +21,6 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user_id: str
-
-
-# ── Chat ──────────────────────────────────────────────────────────────
-
-class ChatMessage(BaseModel):
-    role: str
-    content: str | list[Any]  # str for text-only, list for multimodal (OpenAI vision format)
-
-
-class ChatRequest(BaseModel):
-    messages: list[ChatMessage]
-    model: str | None = None
-    stream: bool = False
 
 
 # ── Chat History ──────────────────────────────────────────────────────

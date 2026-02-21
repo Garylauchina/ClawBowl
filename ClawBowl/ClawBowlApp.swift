@@ -115,7 +115,7 @@ class StartupController: ObservableObject {
         }
     }
 
-    /// 预热后端容器（5 秒超时，失败静默跳过）
+    /// 预热后端容器并获取 Gateway 直连信息（10 秒超时）
     private func warmupContainerQuiet() async {
         guard let token = AuthService.shared.accessToken,
               let url = URL(string: "https://prometheusclothing.net/api/v2/chat/warmup") else {
@@ -125,10 +125,22 @@ class StartupController: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 5
+        request.timeoutInterval = 10
 
-        await withTimeLimit(seconds: 5) {
-            _ = try? await URLSession.shared.data(for: request)
+        await withTimeLimit(seconds: 10) {
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let gwURL = json["gateway_url"] as? String,
+                  let gwToken = json["gateway_token"] as? String,
+                  let sessKey = json["session_key"] as? String else {
+                return
+            }
+            await ChatService.shared.configure(
+                gatewayURL: gwURL,
+                gatewayToken: gwToken,
+                sessionKey: sessKey
+            )
         }
     }
 

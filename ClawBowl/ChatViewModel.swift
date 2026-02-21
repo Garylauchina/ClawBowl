@@ -20,13 +20,6 @@ final class ChatViewModel: ObservableObject {
     private var throttleTask: Task<Void, Never>?
     private static let throttleInterval: UInt64 = 100_000_000 // 100ms
 
-    /// Whether older messages are available from the server
-    @Published var hasOlderMessages = false
-    @Published var isLoadingHistory = false
-
-    private var oldestTimestamp: String?
-    private var hasLoadedFromServer = false
-
     // MARK: - Lifecycle
 
     init() {
@@ -34,104 +27,6 @@ final class ChatViewModel: ObservableObject {
             messages = saved
         } else {
             messages = [Message(role: .assistant, content: "你好！我是 AI 助手，有什么可以帮你的吗？")]
-        }
-    }
-
-    /// Called on first appear — sync local cache with server history
-    func loadInitialHistory() {
-        guard !hasLoadedFromServer else { return }
-        hasLoadedFromServer = true
-        Task {
-            await syncFromServer()
-        }
-    }
-
-    /// Load initial messages from server, merging with local cache
-    private func syncFromServer() async {
-        do {
-            let response = try await ChatService.shared.fetchHistory(limit: 50)
-            hasOlderMessages = response.hasMore
-            if let first = response.messages.first?.createdAt {
-                oldestTimestamp = first
-            }
-
-            guard !response.messages.isEmpty else { return }
-
-            let serverMessages = response.messages.compactMap { h -> Message? in
-                guard let role = Message.Role(rawValue: h.role) else { return nil }
-                let status: Message.Status
-                switch h.status {
-                case "error": status = .error
-                case "interrupted":  status = .sent
-                default: status = .sent
-                }
-                var content = h.content
-                if h.status == "interrupted" && !content.hasSuffix("[已中断]") {
-                    content += "\n\n[已中断]"
-                }
-                return Message(
-                    role: role,
-                    content: content,
-                    status: status,
-                    eventId: h.eventId
-                )
-            }
-
-            // If local cache has only the welcome message, replace entirely
-            if messages.count <= 1 && messages.first?.role == .assistant
-                && messages.first?.eventId == nil && !serverMessages.isEmpty {
-                messages = serverMessages
-                MessageStore.save(messages)
-            }
-        } catch {
-            // Silently fail — local cache is still available
-        }
-    }
-
-    /// Load older messages when user scrolls to top
-    func loadOlderMessages() async {
-        guard hasOlderMessages, !isLoadingHistory else { return }
-        isLoadingHistory = true
-        defer { isLoadingHistory = false }
-
-        do {
-            let response = try await ChatService.shared.fetchHistory(
-                limit: 30,
-                before: oldestTimestamp
-            )
-            hasOlderMessages = response.hasMore
-
-            let olderMessages = response.messages.compactMap { h -> Message? in
-                guard let role = Message.Role(rawValue: h.role) else { return nil }
-                let existingIds = Set(messages.compactMap(\.eventId))
-                if existingIds.contains(h.eventId) { return nil }
-
-                let status: Message.Status
-                switch h.status {
-                case "error": status = .error
-                default: status = .sent
-                }
-                var content = h.content
-                if h.status == "interrupted" && !content.hasSuffix("[已中断]") {
-                    content += "\n\n[已中断]"
-                }
-                return Message(
-                    role: role,
-                    content: content,
-                    status: status,
-                    eventId: h.eventId
-                )
-            }
-
-            if let first = response.messages.first?.createdAt {
-                oldestTimestamp = first
-            }
-
-            guard !olderMessages.isEmpty else { return }
-            messages.insert(contentsOf: olderMessages, at: 0)
-            MessageStore.save(messages)
-        } catch {
-            // Silently fail
         }
     }
 

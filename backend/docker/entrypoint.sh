@@ -1,6 +1,13 @@
 #!/bin/sh
 set -e
 
+# Make all new files world-readable so the host backend (non-root) can
+# read session JSONL files for reconciliation (see DESIGN.md §21.2).
+umask 0022
+
+# Fix permissions on existing session files created with restrictive umask
+chmod -R o+rX /data/config/agents 2>/dev/null || true
+
 # Clean up stale X lock files (from container restart)
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 
