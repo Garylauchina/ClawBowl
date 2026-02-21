@@ -110,9 +110,12 @@ class StartupController: ObservableObject {
               let devPub = json["device_public_key"] as? String,
               let devPriv = json["device_private_key"] as? String else { return }
 
+        let gwWSURL = json["gateway_ws_url"] as? String
+
         await ChatService.shared.configure(
             gatewayURL: gwURL, gatewayToken: gwToken, sessionKey: sessKey,
-            devicePrivateKey: devPriv, devicePublicKey: devPub, deviceId: devId
+            devicePrivateKey: devPriv, devicePublicKey: devPub, deviceId: devId,
+            gatewayWSURL: gwWSURL
         )
         try? await ChatService.shared.connect()
     }

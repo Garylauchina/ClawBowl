@@ -149,6 +149,7 @@ async def warmup(
     return {
         "status": "warm",
         "gateway_url": f"/gw/{instance.port}",
+        "gateway_ws_url": f"wss://api.prometheusclothing.net/gw/{instance.port}/",
         "gateway_token": instance.gateway_token,
         "session_key": session_key,
         "device_id": device["device_id"],

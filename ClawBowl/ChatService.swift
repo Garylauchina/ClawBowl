@@ -25,6 +25,7 @@ actor ChatService {
     // MARK: - Gateway state (set by warmup)
 
     private var gatewayPath: String?
+    private var gatewayWSURL: String?
     private var gatewayToken: String?
     private var sessionKey: String?
     private var devicePrivateKeyRaw: Data?
@@ -54,9 +55,11 @@ actor ChatService {
         sessionKey: String,
         devicePrivateKey: String,
         devicePublicKey: String,
-        deviceId: String
+        deviceId: String,
+        gatewayWSURL: String? = nil
     ) {
         self.gatewayPath = gatewayURL
+        self.gatewayWSURL = gatewayWSURL
         self.gatewayToken = gatewayToken
         self.sessionKey = sessionKey
         self.devicePrivateKeyRaw = Data(base64URLDecoded: devicePrivateKey)
@@ -71,9 +74,15 @@ actor ChatService {
             throw ChatError.serviceUnavailable
         }
 
-        let wsBase = apiBase.replacingOccurrences(of: "https://", with: "wss://")
-            .replacingOccurrences(of: "http://", with: "ws://")
-        let wsURL = URL(string: "\(wsBase)\(gwPath)/")!
+        let urlString: String
+        if let directURL = gatewayWSURL {
+            urlString = directURL
+        } else {
+            let wsBase = apiBase.replacingOccurrences(of: "https://", with: "wss://")
+                .replacingOccurrences(of: "http://", with: "ws://")
+            urlString = "\(wsBase)\(gwPath)/"
+        }
+        let wsURL = URL(string: urlString)!
         var request = URLRequest(url: wsURL)
         request.timeoutInterval = 30
 
