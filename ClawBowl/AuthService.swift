@@ -185,7 +185,6 @@ class AuthService: ObservableObject {
     func logout() {
         KeychainHelper.delete(forKey: tokenKey)
         KeychainHelper.delete(forKey: userIdKey)
-        MessageStore.clear()
         isAuthenticated = false
         currentUserId = nil
     }
