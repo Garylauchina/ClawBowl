@@ -199,7 +199,8 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(Array(viewModel.messages.enumerated()), id: \.element.id) { index, message in
+                    loadOlderTrigger
+                    ForEach(Array(viewModel.messages.enumerated()), id: \.element.listId) { index, message in
                         let prev = index > 0 ? viewModel.messages[index - 1] : nil
                         if shouldShowDateSeparator(current: message, previous: prev) {
                             DateSeparator(date: message.timestamp)
@@ -207,7 +208,7 @@ struct ChatView: View {
                         SwipeToReplyWrapper(message: message, onReply: { replyingTo = $0 }) {
                             MessageBubble(message: message, onQuoteReply: { replyingTo = $0 })
                         }
-                        .id(message.id)
+                        .id(message.listId)
                         .onAppear {
                             viewModel.onMessageAppear(message.id)
                         }
@@ -223,7 +224,7 @@ struct ChatView: View {
             .onAppear {
                 scrollProxy = proxy
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    if let lastID = viewModel.messages.last?.id {
+                    if let lastID = viewModel.messages.last?.listId {
                         proxy.scrollTo(lastID, anchor: .bottom)
                     }
                 }
@@ -234,13 +235,20 @@ struct ChatView: View {
             .onChange(of: viewModel.scrollTrigger) { _ in
                 scrollToBottom(proxy: proxy)
             }
+            .onChange(of: viewModel.scrollAnchorAfterPrepend) { anchorId in
+                guard let id = anchorId else { return }
+                viewModel.scrollAnchorAfterPrepend = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    withAnimation(.none) { proxy.scrollTo(id, anchor: .top) }
+                }
+            }
         }
         .overlay(alignment: .bottomTrailing) {
             if !isAtBottom {
                 Button {
                     stopMomentumTrigger &+= 1
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        if let proxy = scrollProxy, let lastID = viewModel.messages.last?.id {
+                        if let proxy = scrollProxy, let lastID = viewModel.messages.last?.listId {
                             proxy.scrollTo(lastID, anchor: .bottom)
                         }
                     }
@@ -309,9 +317,33 @@ struct ChatView: View {
     // MARK: - Scroll
 
     private func scrollToBottom(proxy: ScrollViewProxy) {
-        guard let lastID = viewModel.messages.last?.id else { return }
+        guard let lastID = viewModel.messages.last?.listId else { return }
         DispatchQueue.main.async {
             proxy.scrollTo(lastID, anchor: .bottom)
+        }
+    }
+
+    /// 顶部“加载更多”触发器（Telegram 式上滑加载更早消息）
+    private var loadOlderTrigger: some View {
+        Group {
+            if viewModel.hasMoreHistory {
+                Color.clear
+                    .frame(height: 1)
+                    .id("load-older-trigger")
+                    .onAppear {
+                        Task { await viewModel.loadOlderMessagesIfNeeded() }
+                    }
+                if viewModel.loadingOlder {
+                    HStack {
+                        ProgressView()
+                        Text("加载更早消息…")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+            }
         }
     }
 }

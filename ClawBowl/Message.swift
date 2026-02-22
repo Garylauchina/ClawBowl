@@ -82,6 +82,8 @@ struct FileInfo: Identifiable, Equatable, Codable {
 /// 聊天消息模型
 struct Message: Identifiable, Equatable {
     let id: UUID
+    /// 服务端历史消息稳定 id（分页去重、列表复用不闪烁）
+    var serverId: String?
     let role: Role
     var content: String
     let attachment: Attachment?  // 用户发送的附件（图片或文件）
@@ -97,8 +99,11 @@ struct Message: Identifiable, Equatable {
     /// 后端 event_id，用于与服务器历史同步去重
     var eventId: String?
 
+    /// 列表展示用稳定 id（大列表 LazyVStack 复用、上滑加载不跳动）
+    var listId: String { serverId ?? id.uuidString }
+
     static func == (lhs: Message, rhs: Message) -> Bool {
-        lhs.id == rhs.id &&
+        lhs.listId == rhs.listId &&
         lhs.content == rhs.content &&
         lhs.thinkingText == rhs.thinkingText &&
         lhs.status == rhs.status &&
@@ -120,6 +125,7 @@ struct Message: Identifiable, Equatable {
 
     init(
         id: UUID = UUID(),
+        serverId: String? = nil,
         role: Role,
         content: String,
         attachment: Attachment? = nil,
@@ -131,6 +137,7 @@ struct Message: Identifiable, Equatable {
         eventId: String? = nil
     ) {
         self.id = id
+        self.serverId = serverId
         self.role = role
         self.content = content
         self.attachment = attachment
@@ -169,7 +176,13 @@ enum MessageStore {
 
     /// 保存消息列表（全量缓存，下次启动时作为离线备份）
     static func save(_ messages: [Message]) {
-        let persisted = messages.map { msg -> PersistedMessage in
+        saveRecent(messages, maxCount: .max)
+    }
+
+    /// 大列表只持久化最近 N 条，避免几万条时 JSON 过大导致卡顿与占盘
+    static func saveRecent(_ messages: [Message], maxCount: Int = 500) {
+        let toSave = maxCount < messages.count ? Array(messages.suffix(maxCount)) : messages
+        let persisted = toSave.map { msg -> PersistedMessage in
             var label: String? = nil
             if let att = msg.attachment {
                 label = att.isImage ? "[图片]" : "[文件: \(att.filename)]"

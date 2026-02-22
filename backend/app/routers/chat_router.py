@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import logging
+from datetime import datetime
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -17,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from cryptography.hazmat.primitives import serialization
 from fastapi import APIRouter, Depends
 from pathlib import Path
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
@@ -158,38 +160,72 @@ async def warmup(
     }
 
 
+class HistoryRequest(BaseModel):
+    """Optional pagination: load older messages when scrolling up."""
+    limit: int = 100
+    before: int | None = None  # timestamp in ms; return messages older than this
+
+
+def _ts_to_sortable(ts) -> float:
+    """Normalize timestamp to seconds for sorting (OpenClaw may send ms or ISO)."""
+    if ts is None:
+        return 0.0
+    if isinstance(ts, (int, float)):
+        return float(ts) / 1000.0 if ts > 1e12 else float(ts)
+    if isinstance(ts, str):
+        if ts.isdigit():
+            v = float(ts)
+            return v / 1000.0 if v > 1e12 else v
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+            try:
+                s = ts[:26] if len(ts) >= 26 else ts
+                return datetime.strptime(s, fmt).timestamp()
+            except (ValueError, TypeError):
+                continue
+    return 0.0
+
+
 @router.post("/chat/history")
 async def chat_history(
+    body: HistoryRequest | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Read chat history directly from OpenClaw session JSONL files."""
+    """Read chat history from OpenClaw session JSONL with pagination (Telegram-style).
+    First page: no `before` → returns latest `limit` messages.
+    Next page: `before` = oldestTimestamp from previous → returns older chunk.
+    """
+    req = body or HistoryRequest()
+    limit = max(1, min(500, req.limit))
     instance = await instance_manager.ensure_running(user, db)
     session_key = f"clawbowl-{user.id}"
     sessions_dir = Path(instance.data_path) / "config" / "agents" / "main" / "sessions"
     sessions_json = sessions_dir / "sessions.json"
 
     if not sessions_json.exists():
-        return {"messages": []}
+        return {"messages": [], "hasMore": False, "sessionKey": session_key}
 
     try:
         sessions_data = json.loads(sessions_json.read_text())
     except Exception:
-        return {"messages": []}
+        return {"messages": [], "hasMore": False, "sessionKey": session_key}
 
-    session_info = sessions_data.get(session_key, {})
+    session_info = (
+        sessions_data.get(session_key, {})
+        or sessions_data.get(f"agent:main:{session_key}", {})
+    )
     session_id = session_info.get("sessionId")
     if not session_id:
-        return {"messages": []}
+        return {"messages": [], "hasMore": False, "sessionKey": session_key}
 
     jsonl_path = sessions_dir / f"{session_id}.jsonl"
     if not jsonl_path.exists():
-        return {"messages": []}
+        return {"messages": [], "hasMore": False, "sessionKey": session_key}
 
-    messages = []
+    rows = []
     try:
         with open(jsonl_path, "r") as f:
-            for line in f:
+            for line_idx, line in enumerate(f):
                 line = line.strip()
                 if not line:
                     continue
@@ -197,15 +233,12 @@ async def chat_history(
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-
                 if entry.get("type") != "message":
                     continue
-
                 msg = entry.get("message", {})
                 role = msg.get("role")
                 if role not in ("user", "assistant"):
                     continue
-
                 content = msg.get("content", "")
                 if isinstance(content, list):
                     text = "".join(
@@ -217,19 +250,41 @@ async def chat_history(
                     text = content
                 else:
                     continue
-
                 if not text.strip():
                     continue
-
-                ts = entry.get("timestamp", "")
-
-                messages.append({
+                ts_raw = entry.get("timestamp", "")
+                ts_sort = _ts_to_sortable(ts_raw)
+                rows.append({
+                    "line_idx": line_idx,
                     "role": role,
                     "content": text,
-                    "timestamp": ts,
+                    "timestamp": ts_raw,
+                    "ts_sort": ts_sort,
                 })
     except Exception as e:
         logger.error("Failed to read session JSONL: %s", e)
-        return {"messages": []}
+        return {"messages": [], "hasMore": False, "sessionKey": session_key}
 
-    return {"messages": messages, "sessionKey": session_key}
+    rows.sort(key=lambda r: r["ts_sort"])
+    before_sort = _ts_to_sortable(req.before) if req.before is not None else None
+    if before_sort is not None:
+        rows = [r for r in rows if r["ts_sort"] < before_sort]
+    chunk = rows[-limit:] if len(rows) > limit else rows
+    has_more = len(rows) > limit
+    oldest_ts = chunk[0]["ts_sort"] * 1000 if chunk else None
+
+    out = []
+    for i, r in enumerate(chunk):
+        out.append({
+            "id": f"l{r['line_idx']}",
+            "role": r["role"],
+            "content": r["content"],
+            "timestamp": r["timestamp"],
+        })
+
+    return {
+        "messages": out,
+        "hasMore": has_more,
+        "oldestTimestamp": int(oldest_ts) if oldest_ts is not None else None,
+        "sessionKey": session_key,
+    }

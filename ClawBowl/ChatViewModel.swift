@@ -7,7 +7,12 @@ final class ChatViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var filteredNotice: String?
     @Published var scrollTrigger: UInt = 0
+    /// 上滑加载更多时保持滚动位置（Telegram 式）
+    @Published var scrollAnchorAfterPrepend: String?
+    @Published var loadingOlder = false
+    @Published var hasMoreHistory = false
 
+    private var oldestLoadedTimestampMs: Int?
     private var activeStreamTask: Task<Void, Never>?
     private var readyContinuation: CheckedContinuation<Void, Never>?
     private var pendingReadyID: UUID?
@@ -55,8 +60,9 @@ final class ChatViewModel: ObservableObject {
     }
 
     private static let historyURL = "http://106.55.174.74:8080/api/v2/chat/history"
+    private static let historyPageSize = 100
 
-    /// Load chat history via HTTP POST from backend (reads JSONL directly, no WebSocket needed)
+    /// 首屏/刷新：拉取最新一页历史（不传 before）
     private func loadHistoryViaHTTP() async {
         guard let token = AuthService.shared.accessToken,
               let url = URL(string: Self.historyURL) else {
@@ -67,7 +73,10 @@ final class ChatViewModel: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 20
+        let body: [String: Any] = ["limit": Self.historyPageSize]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -81,23 +90,94 @@ final class ChatViewModel: ObservableObject {
                 return
             }
 
-            let history: [Message] = rawMessages.compactMap { dict in
-                guard let roleStr = dict["role"] as? String,
-                      let content = dict["content"] as? String,
-                      !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    return nil
-                }
-                let role: Message.Role = roleStr == "user" ? .user : .assistant
-                return Message(role: role, content: content)
-            }
+            let history = Self.parseHistoryChunk(rawMessages)
+            let hasMore = (json["hasMore"] as? Bool) ?? false
+            let oldestTs = json["oldestTimestamp"] as? Int
 
-            print("[History] parsed \(history.count) messages from HTTP")
+            print("[History] parsed \(history.count) messages, hasMore=\(hasMore)")
             if !history.isEmpty {
-                self.messages = history
-                MessageStore.save(history)
+                messages = history
+                hasMoreHistory = hasMore
+                oldestLoadedTimestampMs = oldestTs
+                MessageStore.saveRecent(messages, maxCount: Self.historyPageSize * 5)
+            } else {
+                hasMoreHistory = false
+                oldestLoadedTimestampMs = nil
             }
         } catch {
             print("[History] HTTP loadHistory failed: \(error)")
+        }
+    }
+
+    /// 上滑加载更早的历史（分页，保持滚动位置）
+    func loadOlderMessagesIfNeeded() async {
+        guard hasMoreHistory, !loadingOlder,
+              let before = oldestLoadedTimestampMs else { return }
+        guard AuthService.shared.accessToken != nil,
+              let url = URL(string: Self.historyURL) else { return }
+
+        loadingOlder = true
+        let anchorListId = messages.first?.listId
+
+        defer { loadingOlder = false }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(AuthService.shared.accessToken!)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 20
+        let body: [String: Any] = ["limit": Self.historyPageSize, "before": before]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rawMessages = json["messages"] as? [[String: Any]] else { return }
+
+            let older = Self.parseHistoryChunk(rawMessages)
+            let hasMore = (json["hasMore"] as? Bool) ?? false
+            let newOldest = json["oldestTimestamp"] as? Int
+
+            if older.isEmpty { return }
+
+            hasMoreHistory = hasMore
+            oldestLoadedTimestampMs = newOldest
+            scrollAnchorAfterPrepend = anchorListId
+            messages.insert(contentsOf: older, at: 0)
+            MessageStore.saveRecent(messages, maxCount: Self.historyPageSize * 5)
+            print("[History] prepended \(older.count) older, hasMore=\(hasMore)")
+        } catch {
+            print("[History] loadOlder failed: \(error)")
+        }
+    }
+
+    private static func parseHistoryChunk(_ raw: [[String: Any]]) -> [Message] {
+        raw.compactMap { dict in
+            guard let roleStr = dict["role"] as? String,
+                  let content = dict["content"] as? String,
+                  !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            let role: Message.Role = roleStr == "user" ? .user : .assistant
+            let serverId = dict["id"] as? String
+            let timestamp: Date
+            if let ts = dict["timestamp"] as? Double {
+                timestamp = Date(timeIntervalSince1970: ts > 1e12 ? ts / 1000.0 : ts)
+            } else if let ts = dict["timestamp"] as? Int {
+                timestamp = Date(timeIntervalSince1970: Double(ts) / 1000.0)
+            } else if let ts = dict["timestamp"] as? String {
+                if let ms = Double(ts) {
+                    timestamp = Date(timeIntervalSince1970: ms > 1e12 ? ms / 1000.0 : ms)
+                } else if let d = ISO8601DateFormatter().date(from: ts) ?? ISO8601DateFormatter().date(from: ts + "Z") {
+                    timestamp = d
+                } else {
+                    timestamp = Date()
+                }
+            } else {
+                timestamp = Date()
+            }
+            return Message(serverId: serverId, role: role, content: content, timestamp: timestamp)
         }
     }
 
@@ -226,7 +306,7 @@ final class ChatViewModel: ObservableObject {
                 if wasFiltered {
                     let removeCount = min(self.messages.count, 4)
                     self.messages.removeLast(removeCount)
-                    MessageStore.save(self.messages)
+                    MessageStore.saveRecent(self.messages, maxCount: Self.historyPageSize * 5)
                     withAnimation(.easeInOut(duration: 0.3)) {
                         self.filteredNotice = "检测到内容限制，已自动清理相关对话，请继续"
                     }
@@ -248,7 +328,7 @@ final class ChatViewModel: ObservableObject {
                             messages[idx].status = .error
                         }
                     }
-                    MessageStore.save(messages)
+                    MessageStore.saveRecent(messages, maxCount: Self.historyPageSize * 5)
                 }
                 isLoading = false
                 streamingIdx = nil
@@ -269,7 +349,7 @@ final class ChatViewModel: ObservableObject {
                 }
                 isLoading = false
                 streamingIdx = nil
-                MessageStore.save(messages)
+                MessageStore.saveRecent(messages, maxCount: Self.historyPageSize * 5)
             }
         }
     }
@@ -325,7 +405,7 @@ final class ChatViewModel: ObservableObject {
             } else {
                 messages[lastIdx].content = "[已中断]"
             }
-            MessageStore.save(messages)
+            MessageStore.saveRecent(messages, maxCount: Self.historyPageSize * 5)
         }
 
         isLoading = false
