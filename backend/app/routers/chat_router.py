@@ -228,8 +228,8 @@ async def chat_history(
         return {"messages": [], "hasMore": False, "sessionKey": session_key}
 
     session_info = (
-        sessions_data.get(session_key, {})
-        or sessions_data.get(f"agent:main:{session_key}", {})
+        sessions_data.get(f"agent:main:{session_key}", {})
+        or sessions_data.get(session_key, {})
     )
     session_id = session_info.get("sessionId")
     if not session_id:
