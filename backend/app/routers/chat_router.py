@@ -173,15 +173,32 @@ def _ts_to_sortable(ts) -> float:
     if isinstance(ts, (int, float)):
         return float(ts) / 1000.0 if ts > 1e12 else float(ts)
     if isinstance(ts, str):
+        ts = ts.strip()
+        if not ts:
+            return 0.0
         if ts.isdigit():
             v = float(ts)
             return v / 1000.0 if v > 1e12 else v
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S"):
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+        ):
             try:
                 s = ts[:26] if len(ts) >= 26 else ts
                 return datetime.strptime(s, fmt).timestamp()
             except (ValueError, TypeError):
                 continue
+        import re
+        iso_match = re.match(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})", ts)
+        if iso_match:
+            try:
+                return datetime(*map(int, iso_match.groups())).timestamp()
+            except (ValueError, TypeError):
+                pass
     return 0.0
 
 
@@ -269,17 +286,22 @@ async def chat_history(
     before_sort = _ts_to_sortable(req.before) if req.before is not None else None
     if before_sort is not None:
         rows = [r for r in rows if r["ts_sort"] < before_sort]
-    chunk = rows[-limit:] if len(rows) > limit else rows
-    has_more = len(rows) > limit
+    
+    total_count = len(rows)
+    has_more = total_count > limit
+    start_idx = total_count - limit if has_more else 0
+    chunk = rows[start_idx:]
     oldest_ts = chunk[0]["ts_sort"] * 1000 if chunk else None
 
     out = []
     for i, r in enumerate(chunk):
+        # 统一返回毫秒时间戳，避免客户端解析 OpenCLaw 原始格式失败导致显示“刚才”
+        ts_ms = int(r["ts_sort"] * 1000)
         out.append({
             "id": f"l{r['line_idx']}",
             "role": r["role"],
             "content": r["content"],
-            "timestamp": r["timestamp"],
+            "timestamp": ts_ms,
         })
 
     return {

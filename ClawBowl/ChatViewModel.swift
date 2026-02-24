@@ -50,7 +50,11 @@ final class ChatViewModel: ObservableObject {
             forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            Task { @MainActor in await self.loadHistoryViaHTTP() }
+            Task { @MainActor in
+                await ChatService.shared.reconnectIfNeeded()
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                await self.loadHistoryViaHTTP()
+            }
         }
     }
 
@@ -95,15 +99,27 @@ final class ChatViewModel: ObservableObject {
             let oldestTs = json["oldestTimestamp"] as? Int
 
             print("[History] parsed \(history.count) messages, hasMore=\(hasMore)")
-            if !history.isEmpty {
-                messages = history
-                hasMoreHistory = hasMore
-                oldestLoadedTimestampMs = oldestTs
-                MessageStore.saveRecent(messages, maxCount: Self.historyPageSize * 5)
-            } else {
+            
+            if history.isEmpty {
                 hasMoreHistory = false
                 oldestLoadedTimestampMs = nil
+                return
             }
+            
+            if messages.isEmpty {
+                messages = history
+            } else {
+                let existingIds = Set(messages.compactMap { $0.serverId })
+                let newMessages = history.filter { !existingIds.contains($0.serverId ?? "") }
+                if !newMessages.isEmpty {
+                    messages.append(contentsOf: newMessages)
+                    messages.sort { $0.timestamp < $1.timestamp }
+                }
+            }
+            
+            hasMoreHistory = hasMore
+            oldestLoadedTimestampMs = oldestTs
+            MessageStore.saveRecent(messages, maxCount: Self.historyPageSize * 5)
         } catch {
             print("[History] HTTP loadHistory failed: \(error)")
         }

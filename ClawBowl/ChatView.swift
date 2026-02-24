@@ -200,18 +200,14 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     loadOlderTrigger
-                    ForEach(Array(viewModel.messages.enumerated()), id: \.element.listId) { index, message in
-                        let prev = index > 0 ? viewModel.messages[index - 1] : nil
-                        if shouldShowDateSeparator(current: message, previous: prev) {
-                            DateSeparator(date: message.timestamp)
-                        }
-                        SwipeToReplyWrapper(message: message, onReply: { replyingTo = $0 }) {
-                            MessageBubble(message: message, onQuoteReply: { replyingTo = $0 })
-                        }
-                        .id(message.listId)
-                        .onAppear {
-                            viewModel.onMessageAppear(message.id)
-                        }
+                    ForEach(viewModel.messages) { message in
+                        let prevMessage = findPreviousMessage(current: message)
+                        MessageRowView(
+                            message: message,
+                            previousMessage: prevMessage,
+                            onMessageAppear: { viewModel.onMessageAppear(message.id) },
+                            onReply: { replyingTo = $0 }
+                        )
                     }
                 }
                 .padding(.vertical, 8)
@@ -221,6 +217,9 @@ struct ChatView: View {
                 ))
             }
             .scrollDismissesKeyboard(.immediately)
+            .refreshable {
+                await viewModel.loadOlderMessagesIfNeeded()
+            }
             .onAppear {
                 scrollProxy = proxy
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -229,8 +228,10 @@ struct ChatView: View {
                     }
                 }
             }
-            .onChange(of: viewModel.messages.count) { _ in
-                scrollToBottom(proxy: proxy)
+            .onChange(of: viewModel.messages.count) { oldCount, newCount in
+                if newCount > oldCount {
+                    scrollToBottom(proxy: proxy)
+                }
             }
             .onChange(of: viewModel.scrollTrigger) { _ in
                 scrollToBottom(proxy: proxy)
@@ -246,12 +247,7 @@ struct ChatView: View {
         .overlay(alignment: .bottomTrailing) {
             if !isAtBottom {
                 Button {
-                    stopMomentumTrigger &+= 1
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        if let proxy = scrollProxy, let lastID = viewModel.messages.last?.listId {
-                            proxy.scrollTo(lastID, anchor: .bottom)
-                        }
-                    }
+                    scrollToBottomWithRetry()
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 14, weight: .bold))
@@ -323,26 +319,59 @@ struct ChatView: View {
         }
     }
 
-    /// 顶部“加载更多”触发器（Telegram 式上滑加载更早消息）
+    private func scrollToBottomWithRetry() {
+        guard let proxy = scrollProxy,
+              let lastID = viewModel.messages.last?.listId else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.scrollToBottomWithRetry()
+            }
+            return
+        }
+        stopMomentumTrigger &+= 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(lastID, anchor: .bottom)
+            }
+        }
+    }
+
+    private func findPreviousMessage(current: Message) -> Message? {
+        guard let idx = viewModel.messages.firstIndex(where: { $0.id == current.id }),
+              idx > 0 else { return nil }
+        return viewModel.messages[idx - 1]
+    }
+
+    // MARK: - Message Row View (Performance Optimized)
+
+    /// 顶部“加载更多”触发器（上滑出现即加载；下拉刷新也可加载更早）
     private var loadOlderTrigger: some View {
         Group {
             if viewModel.hasMoreHistory {
-                Color.clear
-                    .frame(height: 1)
-                    .id("load-older-trigger")
-                    .onAppear {
-                        Task { await viewModel.loadOlderMessagesIfNeeded() }
-                    }
-                if viewModel.loadingOlder {
-                    HStack {
-                        ProgressView()
-                        Text("加载更早消息…")
+                ZStack(alignment: .center) {
+                    Color.clear
+                        .frame(height: 44)
+                        .contentShape(Rectangle())
+                        .id("load-older-trigger")
+                        .onAppear {
+                            Task { await viewModel.loadOlderMessagesIfNeeded() }
+                        }
+                    if viewModel.loadingOlder {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("加载更早消息…")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                    } else {
+                        Text("上滑或下拉加载更早消息")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
                 }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
             }
         }
     }
@@ -350,7 +379,7 @@ struct ChatView: View {
 
 // MARK: - Swipe to Reply Wrapper (Telegram-style)
 
-private struct SwipeToReplyWrapper<Content: View>: View {
+struct SwipeToReplyWrapper<Content: View>: View {
     let message: Message
     let onReply: (Message) -> Void
     @ViewBuilder let content: () -> Content
@@ -384,6 +413,28 @@ private struct SwipeToReplyWrapper<Content: View>: View {
                     withAnimation(.easeOut(duration: 0.2)) { offset = 0 }
                 }
         )
+    }
+}
+
+// MARK: - Message Row View (Performance Optimized)
+
+private struct MessageRowView: View {
+    let message: Message
+    let previousMessage: Message?
+    let onMessageAppear: () -> Void
+    let onReply: (Message) -> Void
+
+    var body: some View {
+        Group {
+            if shouldShowDateSeparator(current: message, previous: previousMessage) {
+                DateSeparator(date: message.timestamp)
+            }
+            SwipeToReplyWrapper(message: message, onReply: onReply) {
+                MessageBubble(message: message, onQuoteReply: onReply)
+            }
+            .id(message.listId)
+            .onAppear(perform: onMessageAppear)
+        }
     }
 }
 
