@@ -276,6 +276,7 @@ class InstanceManager:
                 environment={
                     "NODE_OPTIONS": f"--max-old-space-size={settings.openclaw_node_max_old_space}",
                     "OPENCLAW_STATE_DIR": "/data/config",
+                    "TAVILY_API_KEY": settings.tavily_api_key or "",
                 },
                 mem_limit=settings.openclaw_container_memory,
                 cpu_quota=int(settings.openclaw_container_cpus * 100000),
