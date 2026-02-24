@@ -202,6 +202,32 @@ def _ts_to_sortable(ts) -> float:
     return 0.0
 
 
+def _extract_text_from_content(content) -> str:
+    """Extract plain text from OpenClaw message content (handles array and string formats)."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type", "")
+            if item_type == "text":
+                parts.append(item.get("text", ""))
+            elif item_type == "toolResult":
+                tool_text = item.get("content", "")
+                if isinstance(tool_text, str):
+                    parts.append(tool_text)
+                elif isinstance(tool_text, list):
+                    for sub in tool_text:
+                        if isinstance(sub, dict) and sub.get("type") == "text":
+                            parts.append(sub.get("text", ""))
+        return "".join(parts)
+    return str(content) if content else ""
+
+
 @router.post("/chat/history")
 async def chat_history(
     body: HistoryRequest | None = None,
@@ -253,20 +279,11 @@ async def chat_history(
                 if entry.get("type") != "message":
                     continue
                 msg = entry.get("message", {})
-                role = msg.get("role")
-                if role not in ("user", "assistant"):
+                role = msg.get("role", "unknown")
+                if role not in ("user", "assistant", "toolResult"):
                     continue
                 content = msg.get("content", "")
-                if isinstance(content, list):
-                    text = "".join(
-                        p.get("text", "")
-                        for p in content
-                        if isinstance(p, dict) and p.get("type") == "text"
-                    )
-                elif isinstance(content, str):
-                    text = content
-                else:
-                    continue
+                text = _extract_text_from_content(content)
                 if not text.strip():
                     continue
                 ts_raw = entry.get("timestamp", "")
