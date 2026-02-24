@@ -228,16 +228,14 @@ struct ChatView: View {
                     }
                 }
             }
-            .onChange(of: viewModel.messages.count) { oldCount, newCount in
-                if newCount > oldCount {
-                    scrollToBottom(proxy: proxy)
-                }
+            .onChange(of: viewModel.messages.count) { _ in
+                scrollToBottom(proxy: proxy)
             }
             .onChange(of: viewModel.scrollTrigger) { _ in
                 scrollToBottom(proxy: proxy)
             }
-            .onChange(of: viewModel.scrollAnchorAfterPrepend) { anchorId in
-                guard let id = anchorId else { return }
+            .onChange(of: viewModel.scrollAnchorAfterPrepend) { _ in
+                guard let id = viewModel.scrollAnchorAfterPrepend else { return }
                 viewModel.scrollAnchorAfterPrepend = nil
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     withAnimation(.none) { proxy.scrollTo(id, anchor: .top) }
