@@ -271,6 +271,9 @@ async def chat_history(
                     continue
                 ts_raw = entry.get("timestamp", "")
                 ts_sort = _ts_to_sortable(ts_raw)
+                # 如果时间戳解析失败（返回0.0），使用行号作为备用排序
+                if ts_sort == 0.0:
+                    ts_sort = float(line_idx) / 1e6  # 行号作为次要排序，避免1970年
                 rows.append({
                     "line_idx": line_idx,
                     "role": role,
@@ -295,8 +298,12 @@ async def chat_history(
 
     out = []
     for i, r in enumerate(chunk):
-        # 统一返回毫秒时间戳，避免客户端解析 OpenCLaw 原始格式失败导致显示“刚才”
-        ts_ms = int(r["ts_sort"] * 1000)
+        # 如果 ts_sort 来自行号（解析失败），使用当前时间作为时间戳
+        ts_sort_value = r["ts_sort"]
+        if ts_sort_value < 1e6:  # 小于1秒的可能是行号生成的
+            ts_ms = int(datetime.now().timestamp() * 1000) - (i * 1000)  # 递减排序
+        else:
+            ts_ms = int(ts_sort_value * 1000)
         out.append({
             "id": f"l{r['line_idx']}",
             "role": r["role"],
