@@ -161,11 +161,17 @@ struct ChatView: View {
     @StateObject private var scrollPositionState = ScrollPositionState()
     @State private var stopMomentumTrigger: UInt = 0
     @State private var replyingTo: Message?
+    /// 延迟构建消息列表，避免 Splash→Chat 切换时同帧构建大视图树触发栈溢出（___chkstk_darwin）
+    @State private var showMessageList = false
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                messageList
+                if showMessageList {
+                    messageList
+                } else {
+                    messageListPlaceholder
+                }
                 Divider()
                 ChatInputBar(
                     text: $inputText,
@@ -205,7 +211,18 @@ struct ChatView: View {
             } message: {
                 Text("确定要退出登录吗？")
             }
+            .onAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    showMessageList = true
+                }
+            }
         }
+    }
+
+    /// 占位，避免切换时同帧构建 ScrollView+LazyVStack+ScrollPositionHelper 导致栈溢出
+    private var messageListPlaceholder: some View {
+        Color.clear
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Message List

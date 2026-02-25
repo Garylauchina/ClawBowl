@@ -205,7 +205,7 @@ struct SplashView: View {
             withAnimation(.spring(response: 0.5, dampingFraction: 0.6)) {
                 logoScale = 1.0
             }
-            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+            withAnimation(.easeInOut(duration: 0.8)) {
                 pulseScale = 1.05
             }
         }
