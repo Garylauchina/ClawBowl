@@ -46,7 +46,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
     @Binding var isAtBottom: Bool
     let stopMomentumTrigger: UInt
 
-    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UIView {
         let v = UIView(frame: .zero)
@@ -57,7 +57,9 @@ struct ScrollPositionHelper: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         let coord = context.coordinator
-        coord.parent = self
+        coord.onAtBottomChange = { [isAtBottom] newValue in
+            isAtBottom = newValue
+        }
         if coord.scrollView == nil {
             DispatchQueue.main.async { coord.attach(from: uiView) }
         }
@@ -68,28 +70,12 @@ struct ScrollPositionHelper: UIViewRepresentable {
     }
 
     class Coordinator {
-        var parent: ScrollPositionHelper
+        var onAtBottomChange: ((Bool) -> Void)?
         weak var scrollView: UIScrollView?
         var observation: NSKeyValueObservation?
         var lastAtBottom = true
         var lastTrigger: UInt = 0
         private var pendingNotify: DispatchWorkItem?
-
-        init(parent: ScrollPositionHelper) { self.parent = parent }
-
-        func attach(from view: UIView) {
-            var cur: UIView? = view
-            while let p = cur?.superview {
-                if let sv = p as? UIScrollView {
-                    scrollView = sv
-                    observation = sv.observe(\.contentOffset, options: [.new]) { [weak self] sv, _ in
-                        self?.checkPosition(sv)
-                    }
-                    break
-                }
-                cur = p
-            }
-        }
 
         private func checkPosition(_ sv: UIScrollView) {
             guard sv.contentSize.height > 0, sv.frame.height > 0 else { return }
@@ -111,17 +97,31 @@ struct ScrollPositionHelper: UIViewRepresentable {
         private func notifyChange(_ atBottom: Bool) {
             pendingNotify?.cancel()
             pendingNotify = nil
+            let callback = onAtBottomChange
             if atBottom {
                 DispatchQueue.main.async {
-                    self.parent.isAtBottom = true
+                    callback?(true)
                 }
             } else {
                 let work = DispatchWorkItem { [weak self] in
-                    guard let self else { return }
-                    self.parent.isAtBottom = false
+                    self?.onAtBottomChange?(false)
                 }
                 pendingNotify = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+            }
+        }
+
+        func attach(from view: UIView) {
+            var cur: UIView? = view
+            while let p = cur?.superview {
+                if let sv = p as? UIScrollView {
+                    scrollView = sv
+                    observation = sv.observe(\.contentOffset, options: [.new]) { [weak self] sv, _ in
+                        self?.checkPosition(sv)
+                    }
+                    break
+                }
+                cur = p
             }
         }
 
@@ -144,7 +144,6 @@ struct ChatView: View {
 
     @State private var isAtBottom = true
     @State private var stopMomentumTrigger: UInt = 0
-    @State private var scrollProxy: ScrollViewProxy?
     @State private var replyingTo: Message?
 
     var body: some View {
@@ -200,7 +199,7 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     loadOlderTrigger
-                    ForEach(viewModel.messages) { message in
+                    ForEach(viewModel.messages, id: \.listId) { message in
                         let prevMessage = findPreviousMessage(current: message)
                         MessageRowView(
                             message: message,
@@ -221,7 +220,6 @@ struct ChatView: View {
                 await viewModel.loadOlderMessagesIfNeeded()
             }
             .onAppear {
-                scrollProxy = proxy
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     if let lastID = viewModel.messages.last?.listId {
                         proxy.scrollTo(lastID, anchor: .bottom)
@@ -237,15 +235,14 @@ struct ChatView: View {
             .onChange(of: viewModel.scrollAnchorAfterPrepend) { _ in
                 guard let id = viewModel.scrollAnchorAfterPrepend else { return }
                 viewModel.scrollAnchorAfterPrepend = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    withAnimation(.none) { proxy.scrollTo(id, anchor: .top) }
-                }
+                withAnimation(.none) { proxy.scrollTo(id, anchor: .top) }
             }
         }
         .overlay(alignment: .bottomTrailing) {
             if !isAtBottom {
                 Button {
-                    scrollToBottomWithRetry()
+                    stopMomentumTrigger &+= 1
+                    viewModel.scrollTrigger &+= 1
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 14, weight: .bold))
@@ -312,25 +309,7 @@ struct ChatView: View {
 
     private func scrollToBottom(proxy: ScrollViewProxy) {
         guard let lastID = viewModel.messages.last?.listId else { return }
-        DispatchQueue.main.async {
-            proxy.scrollTo(lastID, anchor: .bottom)
-        }
-    }
-
-    private func scrollToBottomWithRetry() {
-        guard let proxy = scrollProxy,
-              let lastID = viewModel.messages.last?.listId else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self.scrollToBottomWithRetry()
-            }
-            return
-        }
-        stopMomentumTrigger &+= 1
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo(lastID, anchor: .bottom)
-            }
-        }
+        proxy.scrollTo(lastID, anchor: .bottom)
     }
 
     private func findPreviousMessage(current: Message) -> Message? {
