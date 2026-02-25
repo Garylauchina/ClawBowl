@@ -63,8 +63,15 @@ struct ScrollPositionHelper: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {
         let coord = context.coordinator
         coord.state = state
-        if coord.scrollView == nil {
-            DispatchQueue.main.async { coord.attach(from: uiView) }
+        if coord.scrollView == nil, coord.pendingAttach == nil {
+            let work = DispatchWorkItem { [weak coord, weak uiView] in
+                guard let coord, let uiView, coord.scrollView == nil,
+                      uiView.window != nil else { return }
+                coord.attach(from: uiView)
+                coord.pendingAttach = nil
+            }
+            coord.pendingAttach = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
         if coord.lastTrigger != stopMomentumTrigger {
             coord.lastTrigger = stopMomentumTrigger
@@ -78,12 +85,14 @@ struct ScrollPositionHelper: UIViewRepresentable {
         var observation: NSKeyValueObservation?
         var lastAtBottom = true
         var lastTrigger: UInt = 0
+        var pendingAttach: DispatchWorkItem?
         private var pendingNotify: DispatchWorkItem?
         /// 节流：避免每次 contentOffset 都计算，连续滑动时减少主线程压力
         private var lastCheckTime: CFTimeInterval = 0
         private let throttleInterval: CFTimeInterval = 0.06
 
         private func checkPosition(_ sv: UIScrollView) {
+            guard sv.window != nil else { return }
             let now = CACurrentMediaTime()
             guard now - lastCheckTime >= throttleInterval else { return }
             lastCheckTime = now
@@ -104,11 +113,14 @@ struct ScrollPositionHelper: UIViewRepresentable {
             notifyChange(atBottom)
         }
 
-        /// 防抖：合并连续滑动时的多次更新，只应用最终状态，避免主线程被大量 block 卡死
+        /// 防抖：合并连续滑动时的多次更新；仅在实际变化时写 state，减少重入布局
         private func notifyChange(_ atBottom: Bool) {
             pendingNotify?.cancel()
             let work = DispatchWorkItem { [weak self] in
-                self?.state?.isAtBottom = atBottom
+                guard let self else { return }
+                if self.state?.isAtBottom != atBottom {
+                    self.state?.isAtBottom = atBottom
+                }
             }
             pendingNotify = work
             let deadline: DispatchTime = atBottom ? .now() : .now() + 0.12
