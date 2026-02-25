@@ -13,6 +13,8 @@ final class ChatViewModel: ObservableObject {
     @Published var hasMoreHistory = false
 
     private var oldestLoadedTimestampMs: Int?
+    /// 是否已收到过首屏历史（用于区分首次加载 vs 前台/ready 刷新：首次替换，刷新合并）
+    private var hasReceivedFirstPage = false
     private var activeStreamTask: Task<Void, Never>?
     private var readyContinuation: CheckedContinuation<Void, Never>?
     private var pendingReadyID: UUID?
@@ -100,13 +102,18 @@ final class ChatViewModel: ObservableObject {
 
             print("[History] parsed \(history.count) messages, hasMore=\(hasMore)")
             
+            // Telegram 式：首次首屏以服务端为准并替换本地/占位；后续刷新（前台/ready）只合并新消息
             if history.isEmpty {
+                if !hasReceivedFirstPage {
+                    messages = []
+                    MessageStore.saveRecent([], maxCount: 0)
+                }
                 hasMoreHistory = false
                 oldestLoadedTimestampMs = nil
+                hasReceivedFirstPage = true
                 return
             }
-            
-            if messages.isEmpty {
+            if !hasReceivedFirstPage {
                 messages = history
             } else {
                 let existingIds = Set(messages.compactMap { $0.serverId })
@@ -116,13 +123,18 @@ final class ChatViewModel: ObservableObject {
                     messages.sort { $0.timestamp < $1.timestamp }
                 }
             }
-            
+            hasReceivedFirstPage = true
             hasMoreHistory = hasMore
             oldestLoadedTimestampMs = oldestTs
             MessageStore.saveRecent(messages, maxCount: Self.historyPageSize * 5)
         } catch {
             print("[History] HTTP loadHistory failed: \(error)")
         }
+    }
+
+    /// 下拉刷新：重新拉取首屏并合并（与 Telegram 下拉刷新一致）
+    func refreshHistoryFromServer() async {
+        await loadHistoryViaHTTP()
     }
 
     /// 上滑加载更早的历史（分页，保持滚动位置）

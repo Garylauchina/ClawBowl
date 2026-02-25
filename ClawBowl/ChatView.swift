@@ -79,8 +79,15 @@ struct ScrollPositionHelper: UIViewRepresentable {
         var lastAtBottom = true
         var lastTrigger: UInt = 0
         private var pendingNotify: DispatchWorkItem?
+        /// 节流：避免每次 contentOffset 都计算，连续滑动时减少主线程压力
+        private var lastCheckTime: CFTimeInterval = 0
+        private let throttleInterval: CFTimeInterval = 0.06
 
         private func checkPosition(_ sv: UIScrollView) {
+            let now = CACurrentMediaTime()
+            guard now - lastCheckTime >= throttleInterval else { return }
+            lastCheckTime = now
+
             guard sv.contentSize.height > 0, sv.frame.height > 0 else { return }
             let maxOffsetY = sv.contentSize.height
                 + sv.adjustedContentInset.bottom
@@ -97,20 +104,15 @@ struct ScrollPositionHelper: UIViewRepresentable {
             notifyChange(atBottom)
         }
 
+        /// 防抖：合并连续滑动时的多次更新，只应用最终状态，避免主线程被大量 block 卡死
         private func notifyChange(_ atBottom: Bool) {
             pendingNotify?.cancel()
-            pendingNotify = nil
-            if atBottom {
-                DispatchQueue.main.async { [weak self] in
-                    self?.state?.isAtBottom = true
-                }
-            } else {
-                let work = DispatchWorkItem { [weak self] in
-                    self?.state?.isAtBottom = false
-                }
-                pendingNotify = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+            let work = DispatchWorkItem { [weak self] in
+                self?.state?.isAtBottom = atBottom
             }
+            pendingNotify = work
+            let deadline: DispatchTime = atBottom ? .now() : .now() + 0.12
+            DispatchQueue.main.asyncAfter(deadline: deadline, execute: work)
         }
 
         func attach(from view: UIView) {
@@ -201,6 +203,9 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     loadOlderTrigger
+                    if viewModel.messages.isEmpty {
+                        emptyStatePlaceholder
+                    }
                     ForEach(viewModel.messages, id: \.listId) { message in
                         let prevMessage = findPreviousMessage(current: message)
                         MessageRowView(
@@ -219,7 +224,7 @@ struct ChatView: View {
             }
             .scrollDismissesKeyboard(.immediately)
             .refreshable {
-                await viewModel.loadOlderMessagesIfNeeded()
+                await viewModel.refreshHistoryFromServer()
             }
             .onAppear {
                 if let lastID = viewModel.messages.last?.listId {
@@ -316,6 +321,24 @@ struct ChatView: View {
         guard let idx = viewModel.messages.firstIndex(where: { $0.id == current.id }),
               idx > 0 else { return nil }
         return viewModel.messages[idx - 1]
+    }
+
+    /// 首屏历史为空时展示（Telegram 式：服务端为首屏真相，空则提示发一句）
+    private var emptyStatePlaceholder: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 44))
+                .foregroundColor(.secondary.opacity(0.6))
+            Text("暂无消息")
+                .font(.headline)
+                .foregroundColor(.secondary)
+            Text("发一句开始对话")
+                .font(.subheadline)
+                .foregroundColor(.secondary.opacity(0.8))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 60)
+        .padding(.bottom, 20)
     }
 
     // MARK: - Message Row View (Performance Optimized)
