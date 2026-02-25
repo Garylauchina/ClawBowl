@@ -42,8 +42,13 @@ private func shouldShowDateSeparator(current: Message, previous: Message?) -> Bo
 
 // MARK: - UIKit Bridge: Scroll Position Detection
 
+/// 用引用类型保存是否在底部，避免在 KVO/异步回调里写 struct 的 Binding 导致悬空。
+final class ScrollPositionState: ObservableObject {
+    @Published var isAtBottom: Bool = true
+}
+
 struct ScrollPositionHelper: UIViewRepresentable {
-    @Binding var isAtBottom: Bool
+    @ObservedObject var state: ScrollPositionState
     let stopMomentumTrigger: UInt
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -57,9 +62,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         let coord = context.coordinator
-        coord.onAtBottomChange = { newValue in
-            isAtBottom = newValue
-        }
+        coord.state = state
         if coord.scrollView == nil {
             DispatchQueue.main.async { coord.attach(from: uiView) }
         }
@@ -70,7 +73,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
     }
 
     class Coordinator {
-        var onAtBottomChange: ((Bool) -> Void)?
+        weak var state: ScrollPositionState?
         weak var scrollView: UIScrollView?
         var observation: NSKeyValueObservation?
         var lastAtBottom = true
@@ -97,14 +100,13 @@ struct ScrollPositionHelper: UIViewRepresentable {
         private func notifyChange(_ atBottom: Bool) {
             pendingNotify?.cancel()
             pendingNotify = nil
-            let callback = onAtBottomChange
             if atBottom {
-                DispatchQueue.main.async {
-                    callback?(true)
+                DispatchQueue.main.async { [weak self] in
+                    self?.state?.isAtBottom = true
                 }
             } else {
                 let work = DispatchWorkItem { [weak self] in
-                    self?.onAtBottomChange?(false)
+                    self?.state?.isAtBottom = false
                 }
                 pendingNotify = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
@@ -142,7 +144,7 @@ struct ChatView: View {
     @State private var showLogoutAlert = false
     @State private var showCronView = false
 
-    @State private var isAtBottom = true
+    @StateObject private var scrollPositionState = ScrollPositionState()
     @State private var stopMomentumTrigger: UInt = 0
     @State private var replyingTo: Message?
 
@@ -211,7 +213,7 @@ struct ChatView: View {
                 }
                 .padding(.vertical, 8)
                 .background(ScrollPositionHelper(
-                    isAtBottom: $isAtBottom,
+                    state: scrollPositionState,
                     stopMomentumTrigger: stopMomentumTrigger
                 ))
             }
@@ -220,10 +222,8 @@ struct ChatView: View {
                 await viewModel.loadOlderMessagesIfNeeded()
             }
             .onAppear {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    if let lastID = viewModel.messages.last?.listId {
-                        proxy.scrollTo(lastID, anchor: .bottom)
-                    }
+                if let lastID = viewModel.messages.last?.listId {
+                    proxy.scrollTo(lastID, anchor: .bottom)
                 }
             }
             .onChange(of: viewModel.messages.count) { _ in
@@ -239,7 +239,7 @@ struct ChatView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            if !isAtBottom {
+            if !scrollPositionState.isAtBottom {
                 Button {
                     stopMomentumTrigger &+= 1
                     viewModel.scrollTrigger &+= 1
@@ -257,7 +257,7 @@ struct ChatView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: isAtBottom)
+        .animation(.easeInOut(duration: 0.25), value: scrollPositionState.isAtBottom)
         .overlay(alignment: .bottom) {
             if let notice = viewModel.filteredNotice {
                 Text(notice)
