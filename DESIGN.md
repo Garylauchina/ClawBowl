@@ -435,12 +435,14 @@ docker run -d \
   },
   "tools": {
     "web": {
-      "search": { "enabled": true },
+      "search": { "enabled": false },
       "fetch": { "enabled": true }
     }
   }
 }
 ```
+
+**重要**：OpenClaw 官方内置 `tools.web.search` 仅支持 **Brave / Perplexity / Gemini**，**不支持** `provider: "tavily"`。Tarz 的联网搜索通过 **workspace/skills/web-search**（Skill + 环境变量 `TAVILY_API_KEY`）实现，因此保持 `search.enabled: false`。若改为 `true` 且未配置上述三者之一，可能导致启动或运行异常。详见 `docs/TROUBLESHOOTING-OPENCLAW-TAVILY.md`。
 
 ---
 
