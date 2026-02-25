@@ -57,7 +57,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         let coord = context.coordinator
-        coord.onAtBottomChange = { [isAtBottom] newValue in
+        coord.onAtBottomChange = { newValue in
             isAtBottom = newValue
         }
         if coord.scrollView == nil {
