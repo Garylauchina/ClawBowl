@@ -263,19 +263,16 @@ actor ChatService {
         requestCallbacks.removeAll()
     }
 
-    /// 未知 event 时尝试按通用流式 payload 解析并交给 chat/agent handler
+    /// 未知 event 时尝试按通用流式 payload 解析，最多投递一个 handler，禁止双投
     private func tryFallbackStreamPayload(event: String, payload: [String: Any]) {
-        if let delta = payload["delta"] as? String, !delta.isEmpty, let agent = agentEventHandler {
-            agent(["stream": "assistant", "data": ["delta": delta]])
+        if let delta = payload["delta"] as? String, !delta.isEmpty {
+            if let agent = agentEventHandler {
+                agent(["stream": "assistant", "data": ["delta": delta]])
+            }
             return
         }
-        if let content = payload["content"] as? String, !content.isEmpty {
-            if let chat = chatEventHandler {
-                chat(["state": "delta", "message": ["content": content]])
-            }
-            if let agent = agentEventHandler, payload["stream"] == nil {
-                agent(["stream": "assistant", "data": ["delta": content]])
-            }
+        if let content = payload["content"] as? String, !content.isEmpty, let chat = chatEventHandler {
+            chat(["state": "delta", "message": ["content": content]])
         }
     }
 
@@ -420,6 +417,8 @@ actor ChatService {
                 var seenTools = Set<String>()
                 var thinkingEmitted = false
                 var finalReceived = false
+                /// 事件源单选：一旦 chat 已收过内容，不再从 agent.assistant 写入，避免双源重复
+                var chatContentReceived = false
                 /// 流式合并器：累积 delta，每 50ms flush 一次，避免 token 级 yield
                 var streamContentBuffer = ""
                 let streamBufferLock = NSLock()
@@ -461,6 +460,7 @@ actor ChatService {
                         if text.isEmpty, let top = payload["delta"] as? String { text = top }
 
                         if !text.isEmpty {
+                            chatContentReceived = true
                             appendStreamBuffer(text)
                             startFlushTimer()
                         }
@@ -484,6 +484,7 @@ actor ChatService {
 
                     switch stream {
                     case "assistant", "":
+                        if chatContentReceived { break }
                         let delta = (data["delta"] as? String) ?? (data["content"] as? String) ?? ""
                         if !delta.isEmpty {
                             appendStreamBuffer(delta)

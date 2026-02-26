@@ -326,14 +326,13 @@ final class ChatViewModel: ObservableObject {
                         pendingThinking += status
                         scheduleThrottledFlush(idx: idx)
                     case .content(let text):
+                        let toAppend = Self.dedupeStreamChunk(chunk: text, current: messages[idx].content, pending: pendingContent)
                         if !messages[idx].thinkingText.isEmpty || !pendingThinking.isEmpty {
                             flushThrottleNow(idx: idx)
                             messages[idx].thinkingText = ""
-                            pendingContent += text
-                            scheduleThrottledFlush(idx: idx)
+                            if !toAppend.isEmpty { pendingContent += toAppend; scheduleThrottledFlush(idx: idx) }
                         } else {
-                            pendingContent += text
-                            scheduleThrottledFlush(idx: idx)
+                            if !toAppend.isEmpty { pendingContent += toAppend; scheduleThrottledFlush(idx: idx) }
                         }
                     case .file(let fileInfo):
                         flushThrottleNow(idx: idx)
@@ -409,6 +408,18 @@ final class ChatViewModel: ObservableObject {
     }
 
     // MARK: - Stream Throttle Internals
+
+    /// snapshot/delta 去重：后端发累计快照或重复帧时只追加差量或忽略
+    private static func dedupeStreamChunk(chunk: String, current: String, pending: String) -> String {
+        let existing = current + pending
+        if chunk.count > existing.count, chunk.hasPrefix(existing) {
+            return String(chunk.dropFirst(existing.count))
+        }
+        if chunk == existing || existing.hasSuffix(chunk) {
+            return ""
+        }
+        return chunk
+    }
 
     private func scheduleThrottledFlush(idx: Int) {
         guard throttleTask == nil else { return }

@@ -75,6 +75,8 @@ final class ScrollViewDelegateProxy: NSObject, UIScrollViewDelegate {
 struct ScrollPositionHelper: UIViewRepresentable {
     @ObservedObject var state: ScrollPositionState
     let stopMomentumTrigger: UInt
+    let forceBottomTrigger: UInt
+    let forceBottomAnimated: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -102,6 +104,10 @@ struct ScrollPositionHelper: UIViewRepresentable {
             coord.lastTrigger = stopMomentumTrigger
             coord.stopMomentum()
         }
+        if coord.lastForceBottomTrigger != forceBottomTrigger {
+            coord.lastForceBottomTrigger = forceBottomTrigger
+            coord.forceScrollToBottom(animated: forceBottomAnimated)
+        }
     }
 
     class Coordinator {
@@ -111,6 +117,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
         var observation: NSKeyValueObservation?
         var lastAtBottom = true
         var lastTrigger: UInt = 0
+        var lastForceBottomTrigger: UInt = 0
         var pendingAttach: DispatchWorkItem?
         private var pendingNotify: DispatchWorkItem?
         /// 节流：避免每次 contentOffset 都计算，连续滑动时减少主线程压力
@@ -185,6 +192,19 @@ struct ScrollPositionHelper: UIViewRepresentable {
             let newY = max(-sv.adjustedContentInset.top, sv.contentOffset.y - pageH)
             sv.setContentOffset(CGPoint(x: 0, y: newY), animated: true)
         }
+
+        /// 一键到底 / 流式跟随：UIKit 强制滚到底部，不依赖 scrollTo(id)
+        func forceScrollToBottom(animated: Bool) {
+            guard let sv = scrollView, sv.window != nil else { return }
+            let bottomY = max(
+                -sv.adjustedContentInset.top,
+                sv.contentSize.height + sv.adjustedContentInset.bottom - sv.bounds.height
+            )
+            let work = {
+                sv.setContentOffset(CGPoint(x: 0, y: bottomY), animated: animated)
+            }
+            DispatchQueue.main.async(execute: work)
+        }
     }
 }
 
@@ -200,7 +220,8 @@ struct ChatView: View {
 
     @StateObject private var scrollPositionState = ScrollPositionState()
     @State private var stopMomentumTrigger: UInt = 0
-    @State private var forceScrollToBottomTrigger: Int = 0
+    @State private var forceScrollToBottomTrigger: UInt = 0
+    @State private var forceBottomAnimated: Bool = false
     @State private var replyingTo: Message?
     /// 延迟构建消息列表，避免 Splash→Chat 切换时同帧构建大视图树触发栈溢出（___chkstk_darwin）
     @State private var showMessageList = false
@@ -289,7 +310,9 @@ struct ChatView: View {
                 .padding(.vertical, 8)
                 .background(ScrollPositionHelper(
                     state: scrollPositionState,
-                    stopMomentumTrigger: stopMomentumTrigger
+                    stopMomentumTrigger: stopMomentumTrigger,
+                    forceBottomTrigger: forceScrollToBottomTrigger,
+                    forceBottomAnimated: forceBottomAnimated
                 ))
             }
             .scrollDismissesKeyboard(.immediately)
@@ -305,10 +328,10 @@ struct ChatView: View {
                 scrollToBottom(proxy: proxy)
             }
             .onChange(of: viewModel.followTrigger) { _ in
-                scrollToBottom(proxy: proxy, animated: false, force: false)
-            }
-            .onChange(of: forceScrollToBottomTrigger) { _ in
-                scrollToBottom(proxy: proxy, animated: true, force: true)
+                if scrollPositionState.isAtBottom {
+                    forceBottomAnimated = false
+                    forceScrollToBottomTrigger += 1
+                }
             }
             .onChange(of: viewModel.scrollAnchorAfterPrepend) { _ in
                 guard let id = viewModel.scrollAnchorAfterPrepend else { return }
@@ -320,7 +343,8 @@ struct ChatView: View {
             if !scrollPositionState.isAtBottom {
                 Button {
                     stopMomentumTrigger &+= 1
-                    forceScrollToBottomTrigger += 1
+                    forceBottomAnimated = true
+                    forceScrollToBottomTrigger &+= 1
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 14, weight: .bold))
