@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		E11B32A62D5E000000000022 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = E11B32A62D5E000000000021 /* MarkdownUI */; };
-		E11B32A62D5E000000000032 /* StreamChatAI in Frameworks */ = {isa = PBXBuildFile; productRef = E11B32A62D5E000000000031 /* StreamChatAI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,7 +28,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				E11B32A62D5E000000000022 /* MarkdownUI in Frameworks */,
-				E11B32A62D5E000000000032 /* StreamChatAI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -73,7 +71,6 @@
 			name = ClawBowl;
 			packageProductDependencies = (
 				E11B32A62D5E000000000021 /* MarkdownUI */,
-				E11B32A62D5E000000000031 /* StreamChatAI */,
 			);
 			productName = ClawBowl;
 			productReference = A11B32A62D5E00000000000D /* ClawBowl.app */;
@@ -106,7 +103,6 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				E11B32A62D5E000000000020 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */,
-				E11B32A62D5E000000000030 /* XCRemoteSwiftPackageReference "stream-chat-swift-ai" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A11B32A62D5E000000000004 /* Products */;
@@ -365,15 +361,7 @@
 			repositoryURL = "https://github.com/gonzalezreal/swift-markdown-ui";
 			requirement = {
 				kind = exactVersion;
-				version = 2.4.0;
-			};
-		};
-		E11B32A62D5E000000000030 /* XCRemoteSwiftPackageReference "stream-chat-swift-ai" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/GetStream/stream-chat-swift-ai";
-			requirement = {
-				kind = exactVersion;
-				version = 0.4.0;
+				version = 2.4.1;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -383,11 +371,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = E11B32A62D5E000000000020 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */;
 			productName = MarkdownUI;
-		};
-		E11B32A62D5E000000000031 /* StreamChatAI */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = E11B32A62D5E000000000030 /* XCRemoteSwiftPackageReference "stream-chat-swift-ai" */;
-			productName = StreamChatAI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

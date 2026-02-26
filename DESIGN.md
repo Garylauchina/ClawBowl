@@ -397,9 +397,9 @@ docker run -d \
 | `ClawBowl/ChatService.swift` | WebSocket 客户端 |
 | `ClawBowl/ChatViewModel.swift` | 聊天业务逻辑 |
 | `ClawBowl/Message.swift` | 消息模型 |
-| `ClawBowl/MessageBubble.swift` | 消息气泡（助手用 StreamChatAI 流式 Markdown） |
+| `ClawBowl/MessageBubble.swift` | 消息气泡（MarkdownUI 渲染） |
 
-**iOS 依赖**：[Swift Markdown UI](https://github.com/gonzalezreal/swift-markdown-ui) 2.4.0、[StreamChatAI](https://github.com/GetStream/stream-chat-swift-ai) 0.4.0。须保持 MarkdownUI 为 2.4.0 以与 StreamChatAI 的 exact 依赖一致。
+**iOS 依赖**：[Swift Markdown UI](https://github.com/gonzalezreal/swift-markdown-ui) 2.4.1。StreamChatAI 因依赖 MCP 模块无法解析，暂未接入。
 
 ---
 
