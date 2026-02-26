@@ -200,6 +200,7 @@ struct ChatView: View {
 
     @StateObject private var scrollPositionState = ScrollPositionState()
     @State private var stopMomentumTrigger: UInt = 0
+    @State private var forceScrollToBottomTrigger: Int = 0
     @State private var replyingTo: Message?
     /// 延迟构建消息列表，避免 Splash→Chat 切换时同帧构建大视图树触发栈溢出（___chkstk_darwin）
     @State private var showMessageList = false
@@ -303,6 +304,9 @@ struct ChatView: View {
             .onChange(of: viewModel.scrollTrigger) { _ in
                 scrollToBottom(proxy: proxy)
             }
+            .onChange(of: forceScrollToBottomTrigger) { _ in
+                scrollToBottom(proxy: proxy, animated: true, force: true)
+            }
             .onChange(of: viewModel.scrollAnchorAfterPrepend) { _ in
                 guard let id = viewModel.scrollAnchorAfterPrepend else { return }
                 viewModel.scrollAnchorAfterPrepend = nil
@@ -313,7 +317,7 @@ struct ChatView: View {
             if !scrollPositionState.isAtBottom {
                 Button {
                     stopMomentumTrigger &+= 1
-                    viewModel.scrollTrigger &+= 1
+                    forceScrollToBottomTrigger += 1
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 14, weight: .bold))
@@ -378,8 +382,10 @@ struct ChatView: View {
 
     // MARK: - Scroll
 
-    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool = false) {
-        guard scrollPositionState.isAtBottom else { return }
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool = false, force: Bool = false) {
+        if !force {
+            guard scrollPositionState.isAtBottom else { return }
+        }
         guard let lastID = viewModel.messages.last?.listId else { return }
         if animated {
             withAnimation(.linear(duration: 0.12)) {
