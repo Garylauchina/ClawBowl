@@ -1,8 +1,9 @@
 # iOS Swift 包依赖说明
 
-工程仅依赖 **MarkdownUI**：
+工程依赖：
 
-- **MarkdownUI**：`https://github.com/gonzalezreal/swift-markdown-ui`，版本 2.4.1
+- **MarkdownUI**：`https://github.com/gonzalezreal/swift-markdown-ui`，版本 **2.4.0**
+- **StreamChatAI**：`https://github.com/GetStream/stream-chat-swift-ai`，版本 **0.3.0**（流式消息 UI；勿用 0.4.0，其依赖 MCP 会报错）
 
 若 Xcode 报 **Missing package product 'MarkdownUI'**，请按顺序操作：
 
