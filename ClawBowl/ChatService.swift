@@ -404,10 +404,10 @@ actor ChatService {
                             text = s
                         }
 
+                        if !text.isEmpty {
+                            continuation.yield(.content(text))
+                        }
                         if state == "final" {
-                            if !text.isEmpty {
-                                continuation.yield(.content(text))
-                            }
                             continuation.yield(.done)
                             continuation.finish()
                             finalReceived = true
@@ -423,7 +423,7 @@ actor ChatService {
                     case "assistant":
                         if let delta = data["delta"] as? String, !delta.isEmpty {
                             contentBuffer += delta
-                            continuation.yield(.thinking(delta))
+                            continuation.yield(.content(delta))
                             thinkingEmitted = true
                         }
                     case "tool":

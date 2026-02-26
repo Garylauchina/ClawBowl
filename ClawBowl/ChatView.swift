@@ -50,6 +50,7 @@ final class ScrollPositionState: ObservableObject {
 struct ScrollPositionHelper: UIViewRepresentable {
     @ObservedObject var state: ScrollPositionState
     let stopMomentumTrigger: UInt
+    @Binding var scrollUpOnePageTrigger: Int
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -77,6 +78,10 @@ struct ScrollPositionHelper: UIViewRepresentable {
             coord.lastTrigger = stopMomentumTrigger
             coord.stopMomentum()
         }
+        if coord.lastScrollUpTrigger != scrollUpOnePageTrigger {
+            coord.lastScrollUpTrigger = scrollUpOnePageTrigger
+            coord.scrollUpOnePage()
+        }
     }
 
     class Coordinator {
@@ -85,6 +90,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
         var observation: NSKeyValueObservation?
         var lastAtBottom = true
         var lastTrigger: UInt = 0
+        var lastScrollUpTrigger: Int = 0
         var pendingAttach: DispatchWorkItem?
         private var pendingNotify: DispatchWorkItem?
         /// 节流：避免每次 contentOffset 都计算，连续滑动时减少主线程压力
@@ -145,6 +151,14 @@ struct ScrollPositionHelper: UIViewRepresentable {
             guard let sv = scrollView else { return }
             sv.setContentOffset(sv.contentOffset, animated: false)
         }
+
+        /// 上翻一页
+        func scrollUpOnePage() {
+            guard let sv = scrollView, sv.window != nil else { return }
+            let pageH = max(1, sv.bounds.height)
+            let newY = max(-sv.adjustedContentInset.top, sv.contentOffset.y - pageH)
+            sv.setContentOffset(CGPoint(x: 0, y: newY), animated: true)
+        }
     }
 }
 
@@ -160,6 +174,7 @@ struct ChatView: View {
 
     @StateObject private var scrollPositionState = ScrollPositionState()
     @State private var stopMomentumTrigger: UInt = 0
+    @State private var scrollUpOnePageTrigger: Int = 0
     @State private var replyingTo: Message?
     /// 延迟构建消息列表，避免 Splash→Chat 切换时同帧构建大视图树触发栈溢出（___chkstk_darwin）
     @State private var showMessageList = false
@@ -248,7 +263,8 @@ struct ChatView: View {
                 .padding(.vertical, 8)
                 .background(ScrollPositionHelper(
                     state: scrollPositionState,
-                    stopMomentumTrigger: stopMomentumTrigger
+                    stopMomentumTrigger: stopMomentumTrigger,
+                    scrollUpOnePageTrigger: $scrollUpOnePageTrigger
                 ))
             }
             .scrollDismissesKeyboard(.immediately)
@@ -271,6 +287,12 @@ struct ChatView: View {
                 viewModel.scrollAnchorAfterPrepend = nil
                 withAnimation(.none) { proxy.scrollTo(id, anchor: .top) }
             }
+        }
+        .overlay(alignment: .top) {
+            Color.clear
+                .contentShape(Rectangle())
+                .frame(height: 56)
+                .onTapGesture { scrollUpOnePageTrigger += 1 }
         }
         .overlay(alignment: .bottomTrailing) {
             if !scrollPositionState.isAtBottom {

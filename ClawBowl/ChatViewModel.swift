@@ -309,6 +309,7 @@ final class ChatViewModel: ObservableObject {
                             pendingContent += text
                             scheduleThrottledFlush(idx: idx)
                         }
+                        scrollTrigger &+= 1
                     case .file(let fileInfo):
                         flushThrottleNow(idx: idx)
                         messages[idx].files.append(fileInfo)
