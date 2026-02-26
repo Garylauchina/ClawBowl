@@ -47,10 +47,34 @@ final class ScrollPositionState: ObservableObject {
     @Published var isAtBottom: Bool = true
 }
 
+/// 拦截系统「点击状态栏」：改为上翻一页并返回 false，其余 delegate 转发给原 delegate。
+final class ScrollViewDelegateProxy: NSObject, UIScrollViewDelegate {
+    weak var originalDelegate: UIScrollViewDelegate?
+    var onScrollToTop: (() -> Void)?
+
+    func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
+        onScrollToTop?()
+        return false
+    }
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        if aSelector == #selector(UIScrollViewDelegate.scrollViewShouldScrollToTop(_:)) {
+            return true
+        }
+        return originalDelegate?.responds(to: aSelector) ?? false
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        if aSelector == #selector(UIScrollViewDelegate.scrollViewShouldScrollToTop(_:)) {
+            return nil
+        }
+        return originalDelegate
+    }
+}
+
 struct ScrollPositionHelper: UIViewRepresentable {
     @ObservedObject var state: ScrollPositionState
     let stopMomentumTrigger: UInt
-    @Binding var scrollUpOnePageTrigger: Int
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -78,19 +102,15 @@ struct ScrollPositionHelper: UIViewRepresentable {
             coord.lastTrigger = stopMomentumTrigger
             coord.stopMomentum()
         }
-        if coord.lastScrollUpTrigger != scrollUpOnePageTrigger {
-            coord.lastScrollUpTrigger = scrollUpOnePageTrigger
-            coord.scrollUpOnePage()
-        }
     }
 
     class Coordinator {
         weak var state: ScrollPositionState?
         weak var scrollView: UIScrollView?
+        var delegateProxy: ScrollViewDelegateProxy?
         var observation: NSKeyValueObservation?
         var lastAtBottom = true
         var lastTrigger: UInt = 0
-        var lastScrollUpTrigger: Int = 0
         var pendingAttach: DispatchWorkItem?
         private var pendingNotify: DispatchWorkItem?
         /// 节流：避免每次 contentOffset 都计算，连续滑动时减少主线程压力
@@ -112,7 +132,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
                 atBottom = true
             } else {
                 let distanceFromBottom = maxOffsetY - sv.contentOffset.y
-                atBottom = distanceFromBottom <= 80
+                atBottom = distanceFromBottom <= 32
             }
             guard atBottom != lastAtBottom else { return }
             lastAtBottom = atBottom
@@ -138,6 +158,12 @@ struct ScrollPositionHelper: UIViewRepresentable {
             while let p = cur?.superview {
                 if let sv = p as? UIScrollView {
                     scrollView = sv
+                    sv.scrollsToTop = true
+                    let proxy = ScrollViewDelegateProxy()
+                    proxy.originalDelegate = sv.delegate
+                    proxy.onScrollToTop = { [weak self] in self?.scrollUpOnePage() }
+                    sv.delegate = proxy
+                    delegateProxy = proxy
                     observation = sv.observe(\.contentOffset, options: [.new]) { [weak self] sv, _ in
                         self?.checkPosition(sv)
                     }
@@ -152,7 +178,7 @@ struct ScrollPositionHelper: UIViewRepresentable {
             sv.setContentOffset(sv.contentOffset, animated: false)
         }
 
-        /// 上翻一页
+        /// 上翻一页（由系统点击状态栏触发）
         func scrollUpOnePage() {
             guard let sv = scrollView, sv.window != nil else { return }
             let pageH = max(1, sv.bounds.height)
@@ -174,7 +200,6 @@ struct ChatView: View {
 
     @StateObject private var scrollPositionState = ScrollPositionState()
     @State private var stopMomentumTrigger: UInt = 0
-    @State private var scrollUpOnePageTrigger: Int = 0
     @State private var replyingTo: Message?
     /// 延迟构建消息列表，避免 Splash→Chat 切换时同帧构建大视图树触发栈溢出（___chkstk_darwin）
     @State private var showMessageList = false
@@ -250,11 +275,11 @@ struct ChatView: View {
                     if viewModel.messages.isEmpty {
                         emptyStatePlaceholder
                     }
-                    ForEach(viewModel.messages, id: \.listId) { message in
-                        let prevMessage = findPreviousMessage(current: message)
+                    ForEach(Array(viewModel.messages.enumerated()), id: \.element.listId) { i, message in
+                        let prev = i > 0 ? viewModel.messages[i - 1] : nil
                         MessageRowView(
                             message: message,
-                            previousMessage: prevMessage,
+                            previousMessage: prev,
                             onMessageAppear: { viewModel.onMessageAppear(message.id) },
                             onReply: { replyingTo = $0 }
                         )
@@ -263,8 +288,7 @@ struct ChatView: View {
                 .padding(.vertical, 8)
                 .background(ScrollPositionHelper(
                     state: scrollPositionState,
-                    stopMomentumTrigger: stopMomentumTrigger,
-                    scrollUpOnePageTrigger: $scrollUpOnePageTrigger
+                    stopMomentumTrigger: stopMomentumTrigger
                 ))
             }
             .scrollDismissesKeyboard(.immediately)
@@ -276,9 +300,6 @@ struct ChatView: View {
                     proxy.scrollTo(lastID, anchor: .bottom)
                 }
             }
-            .onChange(of: viewModel.messages.count) { _ in
-                scrollToBottom(proxy: proxy)
-            }
             .onChange(of: viewModel.scrollTrigger) { _ in
                 scrollToBottom(proxy: proxy)
             }
@@ -287,12 +308,6 @@ struct ChatView: View {
                 viewModel.scrollAnchorAfterPrepend = nil
                 withAnimation(.none) { proxy.scrollTo(id, anchor: .top) }
             }
-        }
-        .overlay(alignment: .top) {
-            Color.clear
-                .contentShape(Rectangle())
-                .frame(height: 56)
-                .onTapGesture { scrollUpOnePageTrigger += 1 }
         }
         .overlay(alignment: .bottomTrailing) {
             if !scrollPositionState.isAtBottom {
@@ -363,15 +378,18 @@ struct ChatView: View {
 
     // MARK: - Scroll
 
-    private func scrollToBottom(proxy: ScrollViewProxy) {
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool = false) {
+        guard scrollPositionState.isAtBottom else { return }
         guard let lastID = viewModel.messages.last?.listId else { return }
-        proxy.scrollTo(lastID, anchor: .bottom)
-    }
-
-    private func findPreviousMessage(current: Message) -> Message? {
-        guard let idx = viewModel.messages.firstIndex(where: { $0.id == current.id }),
-              idx > 0 else { return nil }
-        return viewModel.messages[idx - 1]
+        if animated {
+            withAnimation(.linear(duration: 0.12)) {
+                proxy.scrollTo(lastID, anchor: .bottom)
+            }
+        } else {
+            withAnimation(.none) {
+                proxy.scrollTo(lastID, anchor: .bottom)
+            }
+        }
     }
 
     /// 首屏历史为空时展示（Telegram 式：服务端为首屏真相，空则提示发一句）

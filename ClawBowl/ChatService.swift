@@ -225,10 +225,16 @@ actor ChatService {
         case "event":
             let event = frame["event"] as? String ?? ""
             let payload = frame["payload"] as? [String: Any] ?? [:]
+            #if DEBUG
+            let keys = Array(payload.keys).sorted()
+            print("[WS] event: \(event), payload.keys: \(keys)")
+            #endif
             if event == "chat" || event.hasPrefix("chat.") {
                 chatEventHandler?(payload)
             } else if event == "agent" || event.hasPrefix("agent.") {
                 agentEventHandler?(payload)
+            } else if chatEventHandler != nil || agentEventHandler != nil {
+                tryFallbackStreamPayload(event: event, payload: payload)
             }
         default:
             break
@@ -255,6 +261,22 @@ actor ChatService {
             cont.resume(throwing: error)
         }
         requestCallbacks.removeAll()
+    }
+
+    /// 未知 event 时尝试按通用流式 payload 解析并交给 chat/agent handler
+    private func tryFallbackStreamPayload(event: String, payload: [String: Any]) {
+        if let delta = payload["delta"] as? String, !delta.isEmpty, let agent = agentEventHandler {
+            agent(["stream": "assistant", "data": ["delta": delta]])
+            return
+        }
+        if let content = payload["content"] as? String, !content.isEmpty {
+            if let chat = chatEventHandler {
+                chat(["state": "delta", "message": ["content": content]])
+            }
+            if let agent = agentEventHandler, payload["stream"] == nil {
+                agent(["stream": "assistant", "data": ["delta": content]])
+            }
+        }
     }
 
     // MARK: - Send Request
@@ -342,6 +364,18 @@ actor ChatService {
 
     // MARK: - Send Message (Streaming via WebSocket Events)
 
+    private static func extractText(from msgContent: Any?) -> String {
+        guard let msgContent = msgContent else { return "" }
+        if let arr = msgContent as? [[String: Any]] {
+            return arr.compactMap { p -> String? in
+                guard p["type"] as? String == "text" else { return nil }
+                return p["text"] as? String
+            }.joined()
+        }
+        if let s = msgContent as? String { return s }
+        return ""
+    }
+
     private static let toolStatusMap: [String: String] = [
         "image": "正在分析图片...",
         "web_search": "正在搜索网页...",
@@ -386,28 +420,54 @@ actor ChatService {
                 var seenTools = Set<String>()
                 var thinkingEmitted = false
                 var finalReceived = false
-                var contentBuffer = ""
+                /// 流式合并器：累积 delta，每 50ms flush 一次，避免 token 级 yield
+                var streamContentBuffer = ""
+                let streamBufferLock = NSLock()
+                let flushIntervalNs: UInt64 = 50_000_000 // 50ms
+                var flushTask: Task<Void, Never>?
+
+                func flushStreamBuffer() {
+                    streamBufferLock.lock()
+                    let chunk = streamContentBuffer
+                    streamContentBuffer = ""
+                    streamBufferLock.unlock()
+                    if !chunk.isEmpty { continuation.yield(.content(chunk)) }
+                }
+
+                func appendStreamBuffer(_ s: String) {
+                    streamBufferLock.lock()
+                    streamContentBuffer += s
+                    streamBufferLock.unlock()
+                }
+
+                func startFlushTimer() {
+                    guard flushTask == nil else { return }
+                    flushTask = Task {
+                        while !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: flushIntervalNs)
+                            guard !Task.isCancelled else { break }
+                            flushStreamBuffer()
+                        }
+                    }
+                }
 
                 await self.setChatEventHandler { payload in
                     let state = payload["state"] as? String ?? ""
                     let message = payload["message"] as? [String: Any] ?? [:]
 
-                    if state == "delta" || state == "final" {
-                        let msgContent = message["content"]
-                        var text = ""
-                        if let arr = msgContent as? [[String: Any]] {
-                            text = arr.compactMap { p -> String? in
-                                guard p["type"] as? String == "text" else { return nil }
-                                return p["text"] as? String
-                            }.joined()
-                        } else if let s = msgContent as? String {
-                            text = s
-                        }
+                    if state == "delta" || state == "final" || state.isEmpty {
+                        var text = Self.extractText(from: message["content"])
+                        if text.isEmpty, let top = payload["content"] as? String { text = top }
+                        if text.isEmpty, let top = payload["delta"] as? String { text = top }
 
                         if !text.isEmpty {
-                            continuation.yield(.content(text))
+                            appendStreamBuffer(text)
+                            startFlushTimer()
                         }
                         if state == "final" {
+                            flushTask?.cancel()
+                            flushTask = nil
+                            flushStreamBuffer()
                             continuation.yield(.done)
                             continuation.finish()
                             finalReceived = true
@@ -417,13 +477,17 @@ actor ChatService {
 
                 await self.setAgentEventHandler { payload in
                     let stream = payload["stream"] as? String ?? ""
-                    let data = payload["data"] as? [String: Any] ?? [:]
+                    var data = payload["data"] as? [String: Any] ?? [:]
+                    if data.isEmpty, payload["delta"] != nil || payload["content"] != nil {
+                        data = ["delta": payload["delta"] ?? payload["content"] ?? ""]
+                    }
 
                     switch stream {
-                    case "assistant":
-                        if let delta = data["delta"] as? String, !delta.isEmpty {
-                            contentBuffer += delta
-                            continuation.yield(.content(delta))
+                    case "assistant", "":
+                        let delta = (data["delta"] as? String) ?? (data["content"] as? String) ?? ""
+                        if !delta.isEmpty {
+                            appendStreamBuffer(delta)
+                            startFlushTimer()
                             thinkingEmitted = true
                         }
                     case "tool":
@@ -437,11 +501,9 @@ actor ChatService {
                     case "lifecycle":
                         let phase = data["phase"] as? String ?? ""
                         if phase == "end" && !finalReceived {
-                            // lifecycle end without chat.final — use buffered content
-                            let final = contentBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !final.isEmpty {
-                                continuation.yield(.content(final))
-                            }
+                            flushTask?.cancel()
+                            flushTask = nil
+                            flushStreamBuffer()
                             continuation.yield(.done)
                             continuation.finish()
                         }

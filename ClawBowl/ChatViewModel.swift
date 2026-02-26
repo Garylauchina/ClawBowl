@@ -26,6 +26,19 @@ final class ChatViewModel: ObservableObject {
     private var pendingThinking = ""
     private var throttleTask: Task<Void, Never>?
     private static let throttleInterval: UInt64 = 100_000_000 // 100ms
+    private var thinkingTrimCounter: Int = 0
+
+    // MARK: - Scroll Throttle（禁止 token 级滚动）
+
+    private var lastScrollKick: CFTimeInterval = 0
+    private let scrollKickMinInterval: CFTimeInterval = 0.30
+
+    private func kickScrollThrottled() {
+        let now = CACurrentMediaTime()
+        guard now - lastScrollKick >= scrollKickMinInterval else { return }
+        lastScrollKick = now
+        scrollTrigger &+= 1
+    }
 
     // MARK: - Lifecycle
 
@@ -283,7 +296,7 @@ final class ChatViewModel: ObservableObject {
                     }
                 }
 
-                let historyMessages = Array(self.messages.dropLast(2))
+                let historyMessages = Array(self.messages.dropLast(2).suffix(30))
 
                 let stream = try await ChatService.shared.sendMessageStream(
                     actualContent,
@@ -304,16 +317,16 @@ final class ChatViewModel: ObservableObject {
                         if !messages[idx].thinkingText.isEmpty || !pendingThinking.isEmpty {
                             flushThrottleNow(idx: idx)
                             messages[idx].thinkingText = ""
-                            messages[idx].content = text
+                            pendingContent += text
+                            scheduleThrottledFlush(idx: idx)
                         } else {
                             pendingContent += text
                             scheduleThrottledFlush(idx: idx)
                         }
-                        scrollTrigger &+= 1
                     case .file(let fileInfo):
                         flushThrottleNow(idx: idx)
                         messages[idx].files.append(fileInfo)
-                        scrollTrigger &+= 1
+                        kickScrollThrottled()
                     case .filtered(let text):
                         flushThrottleNow(idx: idx)
                         messages[idx].content = text
@@ -399,19 +412,24 @@ final class ChatViewModel: ObservableObject {
         throttleTask = nil
         guard let idx, idx < messages.count else { return }
 
+        var appendedContent = false
         if !pendingContent.isEmpty {
             messages[idx].content += pendingContent
             pendingContent = ""
-            scrollTrigger &+= 1
+            appendedContent = true
         }
         if !pendingThinking.isEmpty {
             messages[idx].thinkingText += pendingThinking
-            if messages[idx].thinkingText.count > 1000 {
+            thinkingTrimCounter += 1
+            if thinkingTrimCounter % 8 == 0, messages[idx].thinkingText.count > 1000 {
                 let text = messages[idx].thinkingText
                 let start = text.index(text.endIndex, offsetBy: -800)
                 messages[idx].thinkingText = "…" + String(text[start...])
             }
             pendingThinking = ""
+        }
+        if appendedContent {
+            kickScrollThrottled()
         }
     }
 
