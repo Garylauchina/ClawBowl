@@ -5,7 +5,9 @@
 - **MarkdownUI**：`https://github.com/gonzalezreal/swift-markdown-ui`，版本 2.4.1  
 - **StreamChatAI**：`https://github.com/GetStream/stream-chat-swift-ai`，版本 0.4.0  
 
-若 Xcode 报 **Missing package product 'MarkdownUI'** 或 **Missing package product 'StreamChatAI'**，请按顺序操作：
+已提交 **Package.resolved**（`ClawBowl.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`），拉取后先**不要删除**该文件，直接打开工程并 Build。
+
+若 Xcode 仍报 **Missing package product 'MarkdownUI'** 或 **Missing package product 'StreamChatAI'**，请按顺序操作：
 
 1. 关闭 Xcode。
 2. 删除本地包缓存（可选，用于清掉错误状态）：

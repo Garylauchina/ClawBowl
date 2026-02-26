@@ -17,6 +17,8 @@ xcuserdata/
 Packages/
 Package.pins
 Package.resolved
+# 保留工程内 Package.resolved，便于他人解析包
+!ClawBowl.xcodeproj/**/Package.resolved
 
 # CocoaPods
 Pods/
