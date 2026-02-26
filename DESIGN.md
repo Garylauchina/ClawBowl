@@ -397,9 +397,9 @@ docker run -d \
 | `ClawBowl/ChatService.swift` | WebSocket 客户端 |
 | `ClawBowl/ChatViewModel.swift` | 聊天业务逻辑 |
 | `ClawBowl/Message.swift` | 消息模型 |
-| `ClawBowl/MessageBubble.swift` | 消息气泡（助手用 StreamChatAI 流式 Markdown） |
+| `ClawBowl/MessageBubble.swift` | 消息气泡（助手用 MarkdownUI 渲染 Markdown） |
 
-**iOS 依赖**：Swift Markdown UI、[StreamChatAI](https://github.com/GetStream/stream-chat-swift-ai)（`StreamingMessageView`、`AITypingIndicatorView`，后端无关，对接现有 WebSocket/ViewModel）。
+**iOS 依赖**：仅 [Swift Markdown UI](https://github.com/gonzalezreal/swift-markdown-ui)（Markdown 渲染）。若网络可访问 GitHub，可后续自行接入 [StreamChatAI](https://github.com/GetStream/stream-chat-swift-ai) 获得流式逐字动画。
 
 ---
 

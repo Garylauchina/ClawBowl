@@ -1,5 +1,4 @@
 import MarkdownUI
-import StreamChatAI
 import SwiftUI
 
 /// 单条消息气泡视图（支持 Markdown 富文本、图片、文件附件和 Agent 生成文件）
@@ -42,21 +41,14 @@ struct MessageBubble: View {
                         thinkingSection
                     }
 
-                    // 文本内容（助手用 StreamChatAI 流式 Markdown，用户用纯文本）
-                    if message.role == .assistant {
-                        if !message.content.isEmpty || message.isStreaming {
-                            StreamingMessageView(
-                                content: message.content,
-                                isGenerating: message.isStreaming
-                            )
-                        }
-                        if message.isStreaming && message.content.isEmpty && message.thinkingText.isEmpty {
-                            AITypingIndicatorView(text: "生成中...")
-                        }
-                    } else if !message.content.isEmpty {
-                        Text(message.content)
-                            .font(.body)
-                            .foregroundColor(.white)
+                    // 文本内容（助手用 Markdown，用户用纯文本）
+                    if !message.content.isEmpty {
+                        contentView
+                    }
+
+                    // 流式接收中、尚无内容时：闪烁光标
+                    if message.isStreaming && message.content.isEmpty && message.thinkingText.isEmpty {
+                        StreamingCursor()
                     }
 
                     // Agent 生成的文件
@@ -122,6 +114,32 @@ struct MessageBubble: View {
             decodedAttachmentImage = await Task.detached(priority: .userInitiated) {
                 UIImage(data: data)
             }.value
+        }
+    }
+
+    // MARK: - Content View (Markdown for assistant, plain text for user)
+
+    @ViewBuilder
+    private var contentView: some View {
+        if message.role == .assistant {
+            Markdown(message.content)
+                .markdownTheme(.clawBowlAssistant)
+                .markdownBlockStyle(\.codeBlock) { configuration in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        configuration.label
+                            .markdownTextStyle {
+                                FontFamily(.system(.monospaced))
+                                FontSize(.em(0.88))
+                            }
+                            .padding(10)
+                    }
+                    .background(Color(.systemGray5))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+        } else {
+            Text(message.content)
+                .font(.body)
+                .foregroundColor(.white)
         }
     }
 
@@ -355,6 +373,21 @@ struct BubbleShape: Shape {
         }
 
         return path
+    }
+}
+
+// MARK: - Streaming Cursor
+
+/// 流式接收中、尚无内容时的闪烁光标
+private struct StreamingCursor: View {
+    @State private var visible = true
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 1)
+            .fill(Color.secondary.opacity(visible ? 0.6 : 0))
+            .frame(width: 2, height: 16)
+            .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true), value: visible)
+            .onAppear { visible.toggle() }
     }
 }
 
