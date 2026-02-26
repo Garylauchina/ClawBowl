@@ -304,6 +304,9 @@ struct ChatView: View {
             .onChange(of: viewModel.scrollTrigger) { _ in
                 scrollToBottom(proxy: proxy)
             }
+            .onChange(of: viewModel.followTrigger) { _ in
+                scrollToBottom(proxy: proxy, animated: false, force: false)
+            }
             .onChange(of: forceScrollToBottomTrigger) { _ in
                 scrollToBottom(proxy: proxy, animated: true, force: true)
             }

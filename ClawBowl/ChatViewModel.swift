@@ -7,6 +7,8 @@ final class ChatViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var filteredNotice: String?
     @Published var scrollTrigger: UInt = 0
+    /// 流式跟随：仅在 isAtBottom 时低频滚到底，与 scrollTrigger 分离
+    @Published var followTrigger: UInt = 0
     /// 上滑加载更多时保持滚动位置（Telegram 式）
     @Published var scrollAnchorAfterPrepend: String?
     @Published var loadingOlder = false
@@ -38,6 +40,16 @@ final class ChatViewModel: ObservableObject {
         guard now - lastScrollKick >= scrollKickMinInterval else { return }
         lastScrollKick = now
         scrollTrigger &+= 1
+    }
+
+    private var lastFollowKick: CFTimeInterval = 0
+    private let followMinInterval: CFTimeInterval = 0.15
+
+    private func kickFollowThrottled() {
+        let now = CACurrentMediaTime()
+        guard now - lastFollowKick >= followMinInterval else { return }
+        lastFollowKick = now
+        followTrigger &+= 1
     }
 
     // MARK: - Lifecycle
@@ -430,6 +442,9 @@ final class ChatViewModel: ObservableObject {
         }
         if appendedContent {
             kickScrollThrottled()
+            if streamingIdx != nil {
+                kickFollowThrottled()
+            }
         }
     }
 
