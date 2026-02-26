@@ -364,16 +364,16 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/gonzalezreal/swift-markdown-ui";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.4.1;
+				kind = exactVersion;
+				version = 2.4.1;
 			};
 		};
 		E11B32A62D5E000000000030 /* XCRemoteSwiftPackageReference "stream-chat-swift-ai" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/GetStream/stream-chat-swift-ai";
 			requirement = {
-				kind = branch;
-				branch = main;
+				kind = exactVersion;
+				version = 0.4.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
