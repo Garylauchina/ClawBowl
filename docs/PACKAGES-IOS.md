@@ -1,8 +1,9 @@
 # iOS Swift 包依赖说明
 
-工程**仅依赖一个** Swift Package：
+工程依赖两个 Swift Package（版本须与 StreamChatAI 一致，勿单独升级）：
 
-- **MarkdownUI**：`https://github.com/gonzalezreal/swift-markdown-ui`，版本 2.4.1（用于助手消息的 Markdown 渲染）
+- **MarkdownUI**：`https://github.com/gonzalezreal/swift-markdown-ui`，**版本 2.4.0**
+- **StreamChatAI**：`https://github.com/GetStream/stream-chat-swift-ai`，版本 0.4.0（流式 Markdown、生成中指示）
 
 若 Xcode 报 **Missing package product 'MarkdownUI'** 或 **Failed to resolve package dependencies**，请按顺序操作：
 
@@ -18,5 +19,3 @@
 6. 再执行 **Product → Build**。
 
 若网络无法直连 GitHub，可配置代理或使用镜像后再执行步骤 4–5。
-
-（可选）若网络稳定，可自行在 Xcode 中通过 **File → Add Package Dependencies** 添加 [StreamChatAI](https://github.com/GetStream/stream-chat-swift-ai)，并在 `MessageBubble` 中改用 `StreamingMessageView` 获得流式逐字动画。
