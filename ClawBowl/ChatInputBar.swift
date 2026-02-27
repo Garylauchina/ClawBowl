@@ -3,6 +3,7 @@ import PhotosUI
 import UniformTypeIdentifiers
 import UIKit
 import Speech
+import AVFoundation
 
 /// 底部聊天输入栏（支持图片、文件附件、语音输入、引用回复）
 struct ChatInputBar: View {
@@ -80,7 +81,7 @@ struct ChatInputBar: View {
                             onSend()
                         }
                     }
-                    .onChange(of: isFocused) { focused in
+                    .onChange(of: isFocused) { _, focused in
                         if focused { checkPasteboardForImage() }
                     }
 
@@ -182,7 +183,7 @@ struct ChatInputBar: View {
         } message: {
             Text(speechManager.permissionMessage)
         }
-        .onChange(of: speechManager.transcribedText) { newValue in
+        .onChange(of: speechManager.transcribedText) { _, newValue in
             if !newValue.isEmpty {
                 text = newValue
             }
@@ -537,7 +538,7 @@ class SpeechRecognitionManager: ObservableObject {
     }
 
     private func checkMicrophoneAndStart() {
-        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+        AVAudioApplication.requestRecordPermission { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 if self.pendingStop { return }

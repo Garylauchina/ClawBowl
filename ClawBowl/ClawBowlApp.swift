@@ -28,7 +28,7 @@ struct ClawBowlApp: App {
                 }
             }
             .animation(.easeInOut, value: authService.isAuthenticated)
-            .onChange(of: scenePhase) { phase in
+            .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
                     Task {
                         await ChatService.shared.reconnectIfNeeded()

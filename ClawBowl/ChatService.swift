@@ -503,7 +503,6 @@ actor ChatService {
                 var activeRunId: String?
                 var lastSeqByRunStream: [String: Int] = [:]
                 var doneReceived = false
-                var graceWindowTask: Task<Void, Never>?
                 let graceWindowMs = 500
 
                 func finishWithGraceWindow() {
@@ -514,7 +513,7 @@ actor ChatService {
                     flushTask = nil
                     flushStreamBuffer()
                     continuation.yield(.done)
-                    graceWindowTask = Task {
+                    Task {
                         try? await Task.sleep(nanoseconds: UInt64(graceWindowMs) * 1_000_000)
                         continuation.finish()
                     }

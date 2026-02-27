@@ -326,16 +326,16 @@ struct ChatView: View {
                     proxy.scrollTo(lastID, anchor: .bottom)
                 }
             }
-            .onChange(of: viewModel.scrollTrigger) { _ in
+            .onChange(of: viewModel.scrollTrigger) { _, _ in
                 scrollToBottom(proxy: proxy)
             }
-            .onChange(of: viewModel.followTrigger) { _ in
+            .onChange(of: viewModel.followTrigger) { _, _ in
                 if scrollPositionState.isAtBottom {
                     forceBottomAnimated = false
                     forceScrollToBottomTrigger += 1
                 }
             }
-            .onChange(of: viewModel.scrollAnchorAfterPrepend) { _ in
+            .onChange(of: viewModel.scrollAnchorAfterPrepend) { _, _ in
                 guard let id = viewModel.scrollAnchorAfterPrepend else { return }
                 viewModel.scrollAnchorAfterPrepend = nil
                 withAnimation(.none) { proxy.scrollTo(id, anchor: .top) }

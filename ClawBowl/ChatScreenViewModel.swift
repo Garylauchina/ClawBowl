@@ -161,7 +161,7 @@ final class ChatScreenViewModel: ObservableObject {
                         files: cur.files + [file], eventId: cur.eventId
                     )
                 }
-            case .finish(let interrupted):
+            case .finish:
                 contentFlushTask?.cancel()
                 contentFlushTask = nil
                 flushContentThrottle()
@@ -209,7 +209,6 @@ final class ChatScreenViewModel: ObservableObject {
 
     private func flushContentThrottle() {
         guard !contentThrottleBuffer.isEmpty else { return }
-        let hadDelta = true
         if let last = messages.last, last.role == .assistant {
             let cur = messages[messages.count - 1]
             messages[messages.count - 1] = Message(

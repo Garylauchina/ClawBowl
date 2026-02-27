@@ -66,7 +66,7 @@ private final class ChatScrollFollowDelegate: NSObject, UIScrollViewDelegate {
         if (scrollView.isDragging || scrollView.isDecelerating), distance > distanceThreshold {
             onUserScrolledUp?()
         }
-        (originalDelegate as? UIScrollViewDelegate)?.scrollViewDidScroll?(scrollView)
+        originalDelegate?.scrollViewDidScroll?(scrollView)
     }
 }
 
@@ -230,13 +230,13 @@ struct ChatScreen: View {
             .onAppear {
                 proxy.scrollTo(bottomSentinelID, anchor: .bottom)
             }
-            .onChange(of: viewModel.followTick) { _ in
+            .onChange(of: viewModel.followTick) { _, _ in
                 if viewModel.isFollowing {
                     proxy.scrollTo(bottomSentinelID, anchor: .bottom)
                 }
             }
-            .onChange(of: snapToBottomTick) { tick in
-                guard tick > 0 else { return }
+            .onChange(of: snapToBottomTick) { _, newTick in
+                guard newTick > 0 else { return }
                 snapScrollTask?.cancel()
                 snapScrollTask = Task {
                     proxy.scrollTo(bottomSentinelID, anchor: .bottom)
