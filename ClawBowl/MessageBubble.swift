@@ -42,10 +42,17 @@ struct MessageBubble: View {
                         thinkingSection
                     }
 
-                    // 文本内容：助手用 StreamChatAI 流式 Markdown
+                    // 文本内容：流式期间降级为纯文本减少重排，结束后再 Markdown
                     if message.role == .assistant {
                         if !message.content.isEmpty || message.isStreaming {
-                            StreamingMessageView(content: message.content, isGenerating: message.isStreaming)
+                            if message.isStreaming {
+                                Text(message.content)
+                                    .font(.body)
+                                    .foregroundColor(.primary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                StreamingMessageView(content: message.content, isGenerating: false)
+                            }
                         }
                         if message.isStreaming && message.content.isEmpty && message.thinkingText.isEmpty {
                             AITypingIndicatorView(text: "生成中...")

@@ -193,13 +193,15 @@ struct ScrollPositionHelper: UIViewRepresentable {
             sv.setContentOffset(CGPoint(x: 0, y: newY), animated: true)
         }
 
-        /// 一键到底 / 流式跟随：UIKit 强制滚到底部，不依赖 scrollTo(id)
+        /// 一键到底 / 流式跟随：UIKit 强制滚到底部；已到底则提前停止
         func forceScrollToBottom(animated: Bool) {
             guard let sv = scrollView, sv.window != nil else { return }
             let bottomY = max(
                 -sv.adjustedContentInset.top,
                 sv.contentSize.height + sv.adjustedContentInset.bottom - sv.bounds.height
             )
+            let distanceFromBottom = bottomY - sv.contentOffset.y
+            if distanceFromBottom <= 32 { return }
             let work = {
                 sv.setContentOffset(CGPoint(x: 0, y: bottomY), animated: animated)
             }
@@ -345,6 +347,16 @@ struct ChatView: View {
                     stopMomentumTrigger &+= 1
                     forceBottomAnimated = true
                     forceScrollToBottomTrigger &+= 1
+                    DispatchQueue.main.async {
+                        stopMomentumTrigger &+= 1
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+                        forceBottomAnimated = false
+                        forceScrollToBottomTrigger &+= 1
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                        forceScrollToBottomTrigger &+= 1
+                    }
                 } label: {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 14, weight: .bold))

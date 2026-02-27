@@ -28,6 +28,14 @@ actor ChatService {
     private var gatewayWSURL: String?
     private var gatewayToken: String?
     private var sessionKey: String?
+    /// 当前选中的会话（话题列表切换时设置）；nil 时使用 configure 的 sessionKey
+    private(set) var currentSessionKey: String?
+
+    var effectiveSessionKey: String? { currentSessionKey ?? sessionKey }
+
+    func setCurrentSessionKey(_ key: String?) {
+        currentSessionKey = key
+    }
     private var devicePrivateKeyRaw: Data?
     private var devicePublicKeyB64: String?
     private var deviceId: String?
@@ -38,7 +46,10 @@ actor ChatService {
     private var receiveLoop: Task<Void, Never>?
     private var requestCallbacks: [String: CheckedContinuation<[String: Any], Error>] = [:]
     private var chatEventHandler: (([String: Any]) -> Void)?
-    private var agentEventHandler: (([String: Any]) -> Void)?
+    private var agentEventHandler: (([String: Any], String) -> Void)?
+    /// 新架构：统一事件入口，由 ChatScreenViewModel 注册；设置后事件只走 sink，不走上述 handler
+    private var eventSink: ((String, [String: Any]) async -> Void)?
+    private var onDisconnectSink: (() async -> Void)?
     private var isConnected = false
     private var reconnectAttempts = 0
     private let maxReconnectAttempts = 5
@@ -229,10 +240,12 @@ actor ChatService {
             let keys = Array(payload.keys).sorted()
             print("[WS] event: \(event), payload.keys: \(keys)")
             #endif
-            if event == "chat" || event.hasPrefix("chat.") {
+            if let sink = eventSink {
+                Task { await sink(event, payload) }
+            } else if event == "chat" || event.hasPrefix("chat.") {
                 chatEventHandler?(payload)
             } else if event == "agent" || event.hasPrefix("agent.") {
-                agentEventHandler?(payload)
+                agentEventHandler?(payload, event)
             } else if chatEventHandler != nil || agentEventHandler != nil {
                 tryFallbackStreamPayload(event: event, payload: payload)
             }
@@ -243,6 +256,12 @@ actor ChatService {
 
     private func handleDisconnect() {
         isConnected = false
+        let disconnectSink = onDisconnectSink
+        onDisconnectSink = nil
+        eventSink = nil
+        if let sink = disconnectSink {
+            Task { await sink() }
+        }
         cancelAllPendingRequests(ChatError.serviceUnavailable)
 
         guard reconnectAttempts < maxReconnectAttempts else { return }
@@ -265,10 +284,8 @@ actor ChatService {
 
     /// 未知 event 时尝试按通用流式 payload 解析，最多投递一个 handler，禁止双投
     private func tryFallbackStreamPayload(event: String, payload: [String: Any]) {
-        if let delta = payload["delta"] as? String, !delta.isEmpty {
-            if let agent = agentEventHandler {
-                agent(["stream": "assistant", "data": ["delta": delta]])
-            }
+        if let delta = payload["delta"] as? String, !delta.isEmpty, let agent = agentEventHandler {
+            agent(["stream": "assistant", "data": ["delta": delta]], "agent")
             return
         }
         if let content = payload["content"] as? String, !content.isEmpty, let chat = chatEventHandler {
@@ -296,11 +313,44 @@ actor ChatService {
         let data = try JSONSerialization.data(withJSONObject: frame)
         try await task.send(.string(String(data: data, encoding: .utf8)!))
 
+        let timeoutNs: UInt64 = 60_000_000_000
         return try await withCheckedThrowingContinuation { continuation in
             self.requestCallbacks[id] = continuation
 
             Task {
-                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                try? await Task.sleep(nanoseconds: timeoutNs)
+                if let cont = self.requestCallbacks.removeValue(forKey: id) {
+                    cont.resume(throwing: ChatError.serverError)
+                }
+            }
+        }
+    }
+
+    /// chat.send 等长任务：超时 >= 5 分钟，防止复杂任务中途被判定超时
+    private func sendRequestLong(method: String, params: [String: Any], timeoutSeconds: Int = 300) async throws -> [String: Any] {
+        guard let task = wsTask, isConnected else {
+            print("[WS] sendRequestLong(\(method)): BLOCKED")
+            throw ChatError.serviceUnavailable
+        }
+
+        let id = UUID().uuidString
+        print("[WS] sendRequestLong(\(method)): id=\(id) timeout=\(timeoutSeconds)s")
+        let frame: [String: Any] = [
+            "type": "req",
+            "id": id,
+            "method": method,
+            "params": params
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: frame)
+        try await task.send(.string(String(data: data, encoding: .utf8)!))
+
+        let timeoutNs = UInt64(max(1, timeoutSeconds)) * 1_000_000_000
+        return try await withCheckedThrowingContinuation { continuation in
+            self.requestCallbacks[id] = continuation
+
+            Task {
+                try? await Task.sleep(nanoseconds: timeoutNs)
                 if let cont = self.requestCallbacks.removeValue(forKey: id) {
                     cont.resume(throwing: ChatError.serverError)
                 }
@@ -311,7 +361,7 @@ actor ChatService {
     // MARK: - Chat History
 
     func loadHistory() async throws -> [Message] {
-        guard let sk = sessionKey else {
+        guard let sk = effectiveSessionKey else {
             print("[History] loadHistory: no sessionKey")
             throw ChatError.serviceUnavailable
         }
@@ -391,7 +441,7 @@ actor ChatService {
         attachment: Attachment? = nil,
         history: [Message]
     ) async throws -> AsyncThrowingStream<StreamEvent, Error> {
-        guard let sk = sessionKey, isConnected else {
+        guard let sk = effectiveSessionKey, isConnected else {
             throw ChatError.serviceUnavailable
         }
 
@@ -450,6 +500,26 @@ actor ChatService {
                     }
                 }
 
+                var activeRunId: String?
+                var lastSeqByRunStream: [String: Int] = [:]
+                var doneReceived = false
+                var graceWindowTask: Task<Void, Never>?
+                let graceWindowMs = 500
+
+                func finishWithGraceWindow() {
+                    guard !doneReceived else { return }
+                    doneReceived = true
+                    finalReceived = true
+                    flushTask?.cancel()
+                    flushTask = nil
+                    flushStreamBuffer()
+                    continuation.yield(.done)
+                    graceWindowTask = Task {
+                        try? await Task.sleep(nanoseconds: UInt64(graceWindowMs) * 1_000_000)
+                        continuation.finish()
+                    }
+                }
+
                 await self.setChatEventHandler { payload in
                     let state = payload["state"] as? String ?? ""
                     let message = payload["message"] as? [String: Any] ?? [:]
@@ -465,18 +535,29 @@ actor ChatService {
                             startFlushTimer()
                         }
                         if state == "final" {
-                            flushTask?.cancel()
-                            flushTask = nil
-                            flushStreamBuffer()
-                            continuation.yield(.done)
-                            continuation.finish()
-                            finalReceived = true
+                            finishWithGraceWindow()
                         }
                     }
                 }
 
-                await self.setAgentEventHandler { payload in
+                await self.setAgentEventHandler { payload, event in
+                    let runId = payload["runId"] as? String ?? (payload["data"] as? [String: Any])?["runId"] as? String
+                    let seqRaw = payload["seq"] ?? (payload["data"] as? [String: Any])?["seq"]
+                    let seq: Int? = (seqRaw as? Int) ?? (seqRaw as? Double).map { Int($0) }
+                    if let rid = runId, activeRunId == nil {
+                        activeRunId = rid
+                    }
+                    if let rid = runId, let active = activeRunId, rid != active {
+                        return
+                    }
                     let stream = payload["stream"] as? String ?? ""
+                    let streamKey = "\(runId ?? "")_\(stream)"
+                    if let s = seq {
+                        let last = lastSeqByRunStream[streamKey] ?? -1
+                        if s <= last { return }
+                        lastSeqByRunStream[streamKey] = s
+                    }
+
                     var data = payload["data"] as? [String: Any] ?? [:]
                     if data.isEmpty, payload["delta"] != nil || payload["content"] != nil {
                         data = ["delta": payload["delta"] ?? payload["content"] ?? ""]
@@ -484,6 +565,7 @@ actor ChatService {
 
                     switch stream {
                     case "assistant", "":
+                        if event != "agent" { break }
                         if chatContentReceived { break }
                         let delta = (data["delta"] as? String) ?? (data["content"] as? String) ?? ""
                         if !delta.isEmpty {
@@ -502,11 +584,9 @@ actor ChatService {
                     case "lifecycle":
                         let phase = data["phase"] as? String ?? ""
                         if phase == "end" && !finalReceived {
-                            flushTask?.cancel()
-                            flushTask = nil
-                            flushStreamBuffer()
-                            continuation.yield(.done)
-                            continuation.finish()
+                            if runId == nil || runId == activeRunId {
+                                finishWithGraceWindow()
+                            }
                         }
                     default:
                         break
@@ -514,12 +594,12 @@ actor ChatService {
                 }
 
                 do {
-                    let _ = try await self.sendRequest(method: "chat.send", params: [
+                    let _ = try await self.sendRequestLong(method: "chat.send", params: [
                         "sessionKey": sk,
                         "message": messageText,
                         "deliver": true,
                         "idempotencyKey": idempotencyKey
-                    ])
+                    ], timeoutSeconds: 300)
                 } catch {
                     continuation.finish(throwing: error)
                 }
@@ -539,20 +619,41 @@ actor ChatService {
         chatEventHandler = handler
     }
 
-    private func setAgentEventHandler(_ handler: (([String: Any]) -> Void)?) {
+    private func setAgentEventHandler(_ handler: (([String: Any], String) -> Void)?) {
         agentEventHandler = handler
+    }
+
+    /// 新架构：由 ChatScreenViewModel 注册；事件与断线回调
+    func setEventSink(sink: ((String, [String: Any]) async -> Void)?, onDisconnect: (() async -> Void)?) {
+        eventSink = sink
+        onDisconnectSink = onDisconnect
+    }
+
+    /// 仅发送 chat.send，不返回流；流式结果通过 eventSink 推送
+    func sendMessageOnly(sessionKey sk: String, messageText: String, idempotencyKey: String) async throws {
+        _ = try await sendRequestLong(method: "chat.send", params: [
+            "sessionKey": sk,
+            "message": messageText,
+            "deliver": true,
+            "idempotencyKey": idempotencyKey
+        ], timeoutSeconds: 300)
+    }
+
+    /// 上传附件，返回 path；供 ChatScreenViewModel 构建 messageText 后调用 sendMessageOnly
+    func uploadAttachment(_ attachment: Attachment) async throws -> String {
+        try await uploadAttachmentImpl(attachment)
     }
 
     // MARK: - Cancel Chat
 
     func cancelChat() async {
-        guard let sk = sessionKey, isConnected else { return }
+        guard let sk = effectiveSessionKey, isConnected else { return }
         _ = try? await sendRequest(method: "chat.abort", params: ["sessionKey": sk])
     }
 
     // MARK: - Upload Attachment (HTTP)
 
-    private func uploadAttachment(_ attachment: Attachment) async throws -> String {
+    private func uploadAttachmentImpl(_ attachment: Attachment) async throws -> String {
         guard let token = await AuthService.shared.accessToken else {
             throw ChatError.notAuthenticated
         }

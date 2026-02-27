@@ -17,7 +17,7 @@ struct ClawBowlApp: App {
                             startup.beginStartup()
                         }
                 } else if authService.isAuthenticated {
-                    ChatView()
+                    TopicListView()
                         .environmentObject(authService)
                         .onAppear {
                             NotificationManager.shared.requestPermission()
