@@ -79,7 +79,7 @@ enum SessionStore {
         }
         return contents
             .filter { $0.hasSuffix(".json") }
-            .map { ($0 as NSString).deletingPathExtension() }
+            .map { ($0 as NSString).deletingPathExtension }
             .sorted()
     }
 }
