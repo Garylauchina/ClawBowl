@@ -81,7 +81,7 @@ struct TopicListView: View {
     }
 }
 
-struct TopicItem: Identifiable {
+struct TopicItem: Identifiable, Hashable {
     let sessionKey: String
     var id: String { sessionKey }
 }

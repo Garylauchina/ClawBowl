@@ -33,7 +33,7 @@ final class ChatScreenViewModel: ObservableObject {
             }, onDisconnect: { [weak self] in
                 await self?.handleDisconnect()
             })
-            reducer.resetRun()
+            await reducer.resetRun()
             await loadHistory()
         }
     }
@@ -80,12 +80,12 @@ final class ChatScreenViewModel: ObservableObject {
         let idempotencyKey = UUID().uuidString
 
         let userMsg = Message(role: .user, content: content, attachment: attachment, status: .sent)
-        let placeholderAssistant = Message(role: .assistant, content: "", isStreaming: true, status: .sent)
+        let placeholderAssistant = Message(role: .assistant, content: "", status: .sent, isStreaming: true)
         messages.append(userMsg)
         messages.append(placeholderAssistant)
         isStreaming = true
         streamError = nil
-        reducer.resetRun()
+        await reducer.resetRun()
 
         do {
             try await ChatService.shared.sendMessageOnly(sessionKey: sessionKey, messageText: messageText, idempotencyKey: idempotencyKey)
